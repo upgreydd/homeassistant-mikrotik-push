@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from .const import IDENTITY_PATH
 from .registry import HostRegistry, Row, Table
-from .routeros import LoginRejected, RouterOSConnection, RouterOSError, forward_events
+from .routeros import AccessRefused, RouterOSConnection, RouterOSError, forward_events
 from .telemetry import RouterTelemetry
 
 _LOGGER = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ class RouterWatcher:
     def __init__(
         self,
         connect: ConnectionFactory,
-        on_login_rejected: Callable[[], None],
+        on_access_refused: Callable[[], None],
         timing: Timing = Timing(),
         telemetry: RouterTelemetry | None = None,
     ) -> None:
@@ -60,7 +60,7 @@ class RouterWatcher:
         self.telemetry = telemetry
         self.connected = False
         self._connect = connect
-        self._on_login_rejected = on_login_rejected
+        self._on_access_refused = on_access_refused
         self._timing = timing
         self._retry_delay = timing.first_retry_delay
         self._listeners: list[Listener] = []
@@ -88,10 +88,10 @@ class RouterWatcher:
                 if loop.time() - started > self._timing.max_retry_delay:
                     self._retry_delay = self._timing.first_retry_delay  # the link was stable
                 connection = await self._reconnect()
-        except LoginRejected as error:
-            _LOGGER.error("The router rejected the login, stopping: %s", error)
+        except AccessRefused as error:
+            _LOGGER.error("Access to the router was refused, stopping: %s", error)
             self._mark_disconnected()
-            self._on_login_rejected()
+            self._on_access_refused()
         finally:
             self.connected = False
             if self._grace_timer:
@@ -100,7 +100,7 @@ class RouterWatcher:
     async def _run_session(self, connection: RouterOSConnection) -> None:
         try:
             await self._watch(connection)
-        except Exception as error:  # noqa: BLE001 - any failure must lead to a reconnect
+        except Exception as error:
             _log_failure("Lost the router connection", error)
 
     async def _watch(self, connection: RouterOSConnection) -> None:
@@ -170,9 +170,9 @@ class RouterWatcher:
             self._retry_delay = min(self._retry_delay * 2, self._timing.max_retry_delay)
             try:
                 return await self._connect()
-            except LoginRejected:
+            except AccessRefused:
                 raise
-            except Exception as error:  # noqa: BLE001 - keep trying whatever went wrong
+            except Exception as error:
                 _log_failure("Reconnecting to the router failed", error)
 
     def _mark_disconnected(self) -> None:

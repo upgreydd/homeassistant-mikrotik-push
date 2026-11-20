@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from typing import Any
@@ -36,8 +37,9 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
-from .connection import open_connection
+from .connection import is_pinnable, open_connection
 from .const import (
+    CONF_CERT_FINGERPRINT,
     CONF_TRACK_PORTS,
     CONF_TRACK_SYSTEM,
     CONF_TRACK_TRAFFIC,
@@ -47,6 +49,7 @@ from .const import (
     DOMAIN,
     MAX_UPDATE_INTERVAL,
     MIN_UPDATE_INTERVAL,
+    REQUEST_TIMEOUT,
 )
 from .router_script import (
     DEFAULT_USERNAME,
@@ -56,12 +59,12 @@ from .router_script import (
     is_safe_host,
 )
 from .router_info import read_router_info
-from .routeros import ConnectionLost, LoginRejected, RouterOSError
+from .routeros import CertificateChanged, ConnectionLost, LoginRejected, RouterOSError
 from .watcher import TABLE_PATHS
 
 _LOGGER = logging.getLogger(__name__)
 
-type Probe = tuple[str, str]  # (router identity, stable router id)
+type Probe = tuple[str, str, str | None]  # (identity, stable router id, certificate fingerprint)
 
 _PASSWORD_FIELD = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
 # The script lives in a form field, not in the description: the frontend redraws the description,
@@ -76,6 +79,7 @@ class MikrotikPushConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._host = ""
         self._password = generate_password()
+        self._shown_certificate: str | None = None  # a changed certificate the user was shown
 
     @staticmethod
     @callback
@@ -105,9 +109,11 @@ class MikrotikPushConfigFlow(ConfigFlow, domain=DOMAIN):
             data.pop(_SCRIPT_KEY, None)
             probe, error = await _probe_router(data)
             if probe is not None:
-                identity, router_id = probe
+                identity, router_id, fingerprint = probe
                 await self.async_set_unique_id(router_id)
                 self._abort_if_unique_id_configured()
+                if fingerprint:
+                    data[CONF_CERT_FINGERPRINT] = fingerprint
                 return self.async_create_entry(title=identity, data=data)
             errors["base"] = error
 
@@ -137,19 +143,32 @@ class MikrotikPushConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         entry = self._get_reauth_entry()
         self._host = entry.data[CONF_HOST]
+        placeholders = {}
         if user_input is not None:
             data = {**entry.data, CONF_PASSWORD: user_input[CONF_PASSWORD]}
-            probe, error = await _probe_router(data)
+            if self._shown_certificate:
+                # The user saw this fingerprint and submitted again: trust exactly that one.
+                data[CONF_CERT_FINGERPRINT] = self._shown_certificate
+            try:
+                probe, error = await _probe_router(data)
+            except CertificateChanged as changed:
+                # Refused before the login, so the password has not left Home Assistant.
+                self._shown_certificate = changed.presented_sha256
+                probe, error = None, "certificate_changed"
             if probe is not None:
-                await self.async_set_unique_id(probe[1])
+                _, router_id, fingerprint = probe
+                await self.async_set_unique_id(router_id)
                 self._abort_if_unique_id_mismatch()
+                if fingerprint:
+                    data[CONF_CERT_FINGERPRINT] = fingerprint
                 return self.async_update_reload_and_abort(entry, data=data)
             errors["base"] = error
+            placeholders["fingerprint"] = self._shown_certificate or ""
         script, ha_address = await self._setup_instructions(entry.data[CONF_USERNAME])
         return self.async_show_form(
             step_id="reauth_confirm",
             errors=errors,
-            description_placeholders={"ha_address": ha_address},
+            description_placeholders={"ha_address": ha_address, **placeholders},
             data_schema=vol.Schema(
                 {
                     vol.Optional(_SCRIPT_KEY, default=script): _SCRIPT_FIELD,
@@ -180,21 +199,26 @@ async def _probe_router(data: Mapping[str, Any]) -> tuple[Probe | None, str]:
     try:
         connection = await open_connection(data)
         try:
-            for path in TABLE_PATHS.values():
-                await connection.call(f"{path}/print")
-            info = await read_router_info(connection)
+            async with asyncio.timeout(REQUEST_TIMEOUT):
+                for path in TABLE_PATHS.values():
+                    await connection.call(f"{path}/print")
+                info = await read_router_info(connection)
+            fingerprint = connection.peer_certificate_sha256()
         finally:
             await connection.close()
     except LoginRejected:
         return None, "invalid_auth"
     except (ConnectionLost, OSError, TimeoutError):
         return None, "cannot_connect"
+    except CertificateChanged:
+        raise  # only possible with a stored fingerprint: the caller decides what to ask
     except RouterOSError:
         return None, "router_error"
     except Exception:
         _LOGGER.exception("Unexpected error while probing the router")
         return None, "unknown"
-    return (info.name, info.serial_number or data[CONF_HOST]), ""
+    pinned = fingerprint if is_pinnable(data) else None
+    return (info.name, info.serial_number or data[CONF_HOST], pinned), ""
 
 
 class MikrotikPushOptionsFlow(OptionsFlowWithReload):

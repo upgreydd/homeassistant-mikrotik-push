@@ -27,6 +27,7 @@ RESOURCE_COMMAND = "/system/resource/monitor"
 STREAM_INTERVAL = "5s"  # the longest interval the router accepts
 HEALTH_POLL_SECONDS = 60  # /system/health has no stream, one cheap read per minute
 UPDATE_POLL_SECONDS = 6 * 3600  # the router itself only learns of new versions now and then
+INTERFACE_RESYNC_SECONDS = 300  # a stream that silently stops must not freeze the port states
 BOOT_TIME_TOLERANCE = timedelta(seconds=60)  # re-reading the uptime must not make the boot time jitter
 PORT_TYPES = frozenset({"ether"})  # includes SFP cages
 _RATE_MBPS = {"Mbps": 1, "Gbps": 1000}
@@ -149,7 +150,7 @@ class RouterTelemetry:
     async def run(self, connection: RouterOSConnection) -> None:
         """Follow the router until the connection fails."""
         self._forget_readings()
-        events: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+        events: asyncio.Queue[dict[str, str] | None] = asyncio.Queue()
         try:
             async with asyncio.TaskGroup() as tasks:
                 if self.features.needs_interfaces:
@@ -157,6 +158,7 @@ class RouterTelemetry:
                     tasks.create_task(
                         _optional("Interface events", forward_events(connection, INTERFACE_PATH, events.put_nowait))
                     )
+                    tasks.create_task(_request_resync_periodically(events))
                 tasks.create_task(self._follow(connection, events, tasks))
                 tasks.create_task(self._publish_fast_values())
         except ExceptionGroup as group:
@@ -175,7 +177,7 @@ class RouterTelemetry:
     async def _follow(
         self,
         connection: RouterOSConnection,
-        events: asyncio.Queue[dict[str, str]],
+        events: asyncio.Queue[dict[str, str] | None],
         tasks: asyncio.TaskGroup,
     ) -> None:
         features = self.features
@@ -187,8 +189,12 @@ class RouterTelemetry:
             tasks.create_task(_optional("Traffic", self._follow_traffic(connection)))
         if features.system:
             tasks.create_task(_optional("CPU and memory", self._follow_load(connection)))
-            tasks.create_task(_optional("Temperatures and voltages", self._poll_health(connection)))
-            tasks.create_task(_optional("RouterOS version", self._poll_update(connection)))
+            tasks.create_task(
+                _poll("Temperatures and voltages", lambda: self._read_health(connection), HEALTH_POLL_SECONDS)
+            )
+            tasks.create_task(
+                _poll("RouterOS version", lambda: self._read_update(connection), UPDATE_POLL_SECONDS)
+            )
         if features.needs_interfaces:
             await _optional("Interface events", self._apply_interface_events(connection, events))
 
@@ -199,11 +205,20 @@ class RouterTelemetry:
         await self._refresh_ports(connection)
 
     async def _apply_interface_events(
-        self, connection: RouterOSConnection, events: asyncio.Queue[dict[str, str]]
+        self, connection: RouterOSConnection, events: asyncio.Queue[dict[str, str] | None]
     ) -> None:
+        """Serves events and resync requests from one queue, so updates never overlap."""
         while True:
             event = await events.get()
-            if event.get(".dead") in ("true", "yes"):
+            if event is None:
+                try:
+                    await self._load_interfaces(connection)
+                except ConnectionLost:
+                    raise
+                except (RouterOSError, KeyError) as error:
+                    _LOGGER.warning("Re-reading the ports failed, will retry: %s", error)
+                    continue
+            elif event.get(".dead") in ("true", "yes"):
                 self._interfaces.pop(event[".id"], None)
             else:
                 self._interfaces[event[".id"]] = {**self._interfaces.get(event[".id"], {}), **event}
@@ -286,33 +301,29 @@ class RouterTelemetry:
             self.boot_time = boot_time
         self._notify(Channel.SYSTEM)
 
-    async def _poll_health(self, connection: RouterOSConnection) -> None:
-        while True:
-            rows = await connection.call("/system/health/print")
-            health = {
-                row["name"]: Health(float(row["value"]), row.get("type", ""))
-                for row in rows
-                if row.get("type") in ("C", "V") and row.get("value")
-            }
-            if health != self.health:
-                self.health = health
-                self._notify(Channel.SYSTEM)
-            await asyncio.sleep(HEALTH_POLL_SECONDS)
+    async def _read_health(self, connection: RouterOSConnection) -> None:
+        rows = await connection.call("/system/health/print")
+        health = {
+            row["name"]: Health(float(row["value"]), row.get("type", ""))
+            for row in rows
+            if row.get("type") in ("C", "V") and row.get("value")
+        }
+        if health != self.health:
+            self.health = health
+            self._notify(Channel.SYSTEM)
 
-    async def _poll_update(self, connection: RouterOSConnection) -> None:
-        while True:
-            rows = await connection.call("/system/package/update/print")
-            if rows and rows[0].get("installed-version"):
-                row = rows[0]
-                update = RouterOsUpdate(
-                    installed=row["installed-version"],
-                    latest=row.get("latest-version") or None,
-                    status=row.get("status", ""),
-                )
-                if update != self.update:
-                    self.update = update
-                    self._notify(Channel.UPDATE)
-            await asyncio.sleep(UPDATE_POLL_SECONDS)
+    async def _read_update(self, connection: RouterOSConnection) -> None:
+        rows = await connection.call("/system/package/update/print")
+        if rows and rows[0].get("installed-version"):
+            row = rows[0]
+            update = RouterOsUpdate(
+                installed=row["installed-version"],
+                latest=row.get("latest-version") or None,
+                status=row.get("status", ""),
+            )
+            if update != self.update:
+                self.update = update
+                self._notify(Channel.UPDATE)
 
     async def _publish_fast_values(self) -> None:
         """First sample goes out at once; after that at most one announcement per interval."""
@@ -335,6 +346,28 @@ class RouterTelemetry:
                 listener(channel)
             except Exception:
                 _LOGGER.exception("A telemetry listener failed")
+
+
+async def _request_resync_periodically(events: asyncio.Queue[dict[str, str] | None]) -> None:
+    while True:
+        await asyncio.sleep(INTERFACE_RESYNC_SECONDS)
+        events.put_nowait(None)
+
+
+async def _poll(what: str, read: Callable[[], Awaitable[None]], seconds: float) -> None:
+    """Repeat one reading; a failed round is logged (once while it keeps failing) and retried."""
+    failing = False
+    while True:
+        try:
+            await read()
+        except ConnectionLost:
+            raise
+        except (RouterOSError, KeyError, ValueError) as error:
+            _LOGGER.log(logging.DEBUG if failing else logging.WARNING, "%s unavailable: %s", what, error)
+            failing = True
+        else:
+            failing = False
+        await asyncio.sleep(seconds)
 
 
 async def _optional(what: str, reading: Awaitable[None]) -> None:

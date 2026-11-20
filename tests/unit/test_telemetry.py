@@ -228,3 +228,47 @@ async def test_the_update_is_unknown_until_the_router_has_checked(router):
 
     assert telemetry.update.latest is None and telemetry.update.installed == "7.25.1"
     await stop(connection, task)
+
+
+async def test_an_interface_change_that_no_event_announced_is_found_by_the_resync(router, monkeypatch):
+    monkeypatch.setattr("mikrotik_push.telemetry.INTERFACE_RESYNC_SECONDS", 0.05)
+    telemetry, connection, task = await start(router, Features(ports=True))
+    await until(lambda: telemetry.ports)
+    router.ethernet_monitor["ether2"] = {"name": "ether2", "status": "link-ok", "rate": "1Gbps"}
+
+    router.tables["/interface"] = [INTERFACES[0], {**INTERFACES[1], "running": "true"}, INTERFACES[2]]
+
+    await until(lambda: telemetry.ports["ether2"].running)
+    assert telemetry.ports["ether2"].rate_mbps == 1000
+    await stop(connection, task)
+
+
+async def test_a_failed_resync_does_not_end_the_port_updates(router, monkeypatch):
+    monkeypatch.setattr("mikrotik_push.telemetry.INTERFACE_RESYNC_SECONDS", 0.05)
+    telemetry, connection, task = await start(router, Features(ports=True))
+    await until(lambda: telemetry.ports)
+    router.failing_commands.add("/interface/print")
+    await asyncio.sleep(0.15)  # several resyncs fail
+    router.failing_commands.clear()
+    router.ethernet_monitor["ether2"] = {"name": "ether2", "status": "link-ok", "rate": "1Gbps"}
+
+    router.tables["/interface"] = [INTERFACES[0], {**INTERFACES[1], "running": "true"}, INTERFACES[2]]
+
+    await until(lambda: telemetry.ports["ether2"].running)
+    assert not task.done()
+    await stop(connection, task)
+
+
+async def test_a_reading_that_failed_is_tried_again_on_the_next_poll(router, monkeypatch):
+    monkeypatch.setattr("mikrotik_push.telemetry.HEALTH_POLL_SECONDS", 0.05)
+    router.tables["/system/health"] = [{".id": "*1", "name": "cpu-temperature", "value": "N/A", "type": "C"}]
+    telemetry, connection, task = await start(router, Features(system=True))
+    await router.wait_for_subscribers(1)
+    await asyncio.sleep(0.15)
+    assert telemetry.health == {}
+
+    router.tables["/system/health"] = [{".id": "*1", "name": "cpu-temperature", "value": "52", "type": "C"}]
+
+    await until(lambda: telemetry.health)
+    assert telemetry.health["cpu-temperature"].value == 52.0 and not task.done()
+    await stop(connection, task)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import itertools
 import logging
 import ssl
@@ -22,8 +23,20 @@ class RouterOSError(Exception):
     """The router answered !trap / !fatal (e.g. no permission, unknown command)."""
 
 
-class LoginRejected(RouterOSError):
+class AccessRefused(RouterOSError):
+    """The router cannot be used with what we hold: the credentials or its certificate changed."""
+
+
+class LoginRejected(AccessRefused):
     """The router refused the user name or password."""
+
+
+class CertificateChanged(AccessRefused):
+    """The router presents another certificate than the one pinned on first use."""
+
+    def __init__(self, presented_sha256: str | None) -> None:
+        super().__init__("the router presents a different certificate than before")
+        self.presented_sha256 = presented_sha256
 
 
 class ConnectionLost(RouterOSError):
@@ -58,12 +71,17 @@ class RouterOSConnection:
         password: str,
         *,
         ssl_context: ssl.SSLContext | None = None,
+        expected_certificate_sha256: str | None = None,
         timeout: float = 10,
     ) -> RouterOSConnection:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port, ssl=ssl_context), timeout
         )
         connection = cls(reader, writer)
+        presented = connection.peer_certificate_sha256()
+        if expected_certificate_sha256 and presented != expected_certificate_sha256:
+            await connection.close()  # before the login: the password must not reach a stranger
+            raise CertificateChanged(presented)
         try:
             await asyncio.wait_for(
                 connection.call("/login", name=username, password=password), timeout
@@ -80,6 +98,12 @@ class RouterOSConnection:
             await connection.close()
             raise
         return connection
+
+    def peer_certificate_sha256(self) -> str | None:
+        """Fingerprint of the certificate the router presented; None on a plain connection."""
+        tls = self._writer.get_extra_info("ssl_object")
+        der = tls.getpeercert(binary_form=True) if tls else None
+        return hashlib.sha256(der).hexdigest() if der else None
 
     async def _read_loop(self) -> None:
         try:
@@ -117,15 +141,11 @@ class RouterOSConnection:
         rows: list[dict[str, str]] = []
         try:
             while True:
-                kind, data = await q.get()
+                kind, data = await _next_reply(q)
                 if kind == "!re":
                     rows.append(data)
-                elif kind == "!empty":  # RouterOS >= 7.18: empty result, !done follows
-                    continue
                 elif kind == "!done":
                     return rows
-                elif kind == "!lost":
-                    raise ConnectionLost("connection lost")
                 else:  # !trap / !fatal
                     raise RouterOSError(data.get("message", kind))
         finally:
@@ -144,16 +164,12 @@ class RouterOSConnection:
         tag, q = await self._send(command, attrs)
         try:
             while True:
-                kind, data = await q.get()
+                kind, data = await _next_reply(q)
                 if kind == "!re":
                     yield data
-                elif kind == "!empty":
-                    continue
-                elif kind == "!lost":
-                    raise ConnectionLost("connection lost")
                 elif kind == "!done" or (kind == "!trap" and data.get("message") == "interrupted"):
                     return
-                elif kind in ("!trap", "!fatal"):
+                else:  # !trap / !fatal
                     raise RouterOSError(data.get("message", kind))
         finally:
             if not self.closed.is_set():
@@ -171,6 +187,17 @@ class RouterOSConnection:
             async with asyncio.timeout(2):
                 await self._writer.wait_closed()
         self.closed.set()
+
+
+async def _next_reply(q: asyncio.Queue) -> tuple[str, dict[str, str]]:
+    """The next reply that matters: `!empty` (RouterOS >= 7.18) is skipped, a lost link raises."""
+    while True:
+        kind, data = await q.get()
+        if kind == "!empty":
+            continue
+        if kind == "!lost":
+            raise ConnectionLost("connection lost")
+        return kind, data
 
 
 async def forward_events(

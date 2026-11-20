@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import asyncio
 from dataclasses import dataclass
-from functools import partial
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -13,18 +13,20 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
-from .connection import open_connection
+from .connection import is_pinnable, open_connection
 from .const import (
+    CONF_CERT_FINGERPRINT,
     CONF_TRACK_PORTS,
     CONF_TRACK_SYSTEM,
     CONF_TRACK_TRAFFIC,
     CONF_UPDATE_INTERVAL,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
+    REQUEST_TIMEOUT,
 )
 from .entity_ids import feature_of
 from .router_info import RouterInfo, read_router_info
-from .routeros import LoginRejected, RouterOSError
+from .routeros import AccessRefused, RouterOSConnection, RouterOSError
 from .telemetry import Channel, Features, RouterTelemetry
 from .watcher import RouterWatcher
 
@@ -42,16 +44,20 @@ PLATFORMS = [Platform.BINARY_SENSOR, Platform.DEVICE_TRACKER, Platform.SENSOR, P
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: MikrotikPushConfigEntry) -> bool:
-    connect = partial(open_connection, entry.data)
+    def connect():  # reads entry.data each time, so a pin stored later is used by reconnects
+        return open_connection(entry.data)
+
     try:
         connection = await connect()
-    except LoginRejected as error:
-        raise ConfigEntryAuthFailed(f"Login rejected: {error}") from error
+    except AccessRefused as error:
+        raise ConfigEntryAuthFailed(f"Access refused: {error}") from error
     except (RouterOSError, OSError, TimeoutError) as error:
         raise ConfigEntryNotReady(f"Cannot reach the router: {error}") from error
 
+    _pin_certificate_on_first_use(hass, entry, connection)
     try:
-        info = await read_router_info(connection)
+        async with asyncio.timeout(REQUEST_TIMEOUT):
+            info = await read_router_info(connection)
         features = Features(
             ports=entry.options.get(CONF_TRACK_PORTS, False),
             traffic=entry.options.get(CONF_TRACK_TRAFFIC, False),
@@ -62,16 +68,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: MikrotikPushConfigEntry)
             publish_interval=int(entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)),
         )
         watcher = RouterWatcher(
-            connect, on_login_rejected=lambda: entry.async_start_reauth(hass), telemetry=telemetry
+            connect, on_access_refused=lambda: entry.async_start_reauth(hass), telemetry=telemetry
         )
         entry.runtime_data = MikrotikPushData(watcher, telemetry, info)
         device = _register_router_device(hass, entry, info)
         entry.async_on_unload(telemetry.add_listener(_keep_version_current(hass, device.id, telemetry)))
-        _remove_entities_of_unselected_features(hass, entry, features)
+        _sync_optional_entities(hass, entry, features)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    except RouterOSError as error:
+    except (RouterOSError, TimeoutError) as error:
         await connection.close()
-        raise ConfigEntryNotReady(f"The router answered unexpectedly: {error}") from error
+        raise ConfigEntryNotReady(f"The router did not answer properly: {error}") from error
     except BaseException:
         await connection.close()
         raise
@@ -84,6 +90,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: MikrotikPushConfigEntry)
 async def async_unload_entry(hass: HomeAssistant, entry: MikrotikPushConfigEntry) -> bool:
     entry.runtime_data.watcher.stop()  # first, so no event reaches a platform being torn down
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+def _pin_certificate_on_first_use(
+    hass: HomeAssistant, entry: MikrotikPushConfigEntry, connection: RouterOSConnection
+) -> None:
+    """Entries created before pinning existed have no fingerprint: take it at their next start."""
+    fingerprint = connection.peer_certificate_sha256()
+    if fingerprint and is_pinnable(entry.data) and CONF_CERT_FINGERPRINT not in entry.data:
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_CERT_FINGERPRINT: fingerprint}
+        )
 
 
 def _register_router_device(
@@ -113,12 +130,26 @@ def _keep_version_current(
     return update_device
 
 
-def _remove_entities_of_unselected_features(
+def _sync_optional_entities(
     hass: HomeAssistant, entry: MikrotikPushConfigEntry, features: Features
 ) -> None:
-    """Switching a feature off in the options removes its entities instead of orphaning them."""
+    """Disable the entities of unselected features and re-enable them when selected again.
+
+    Disabling instead of deleting keeps what the user did to them: names, areas, dashboards.
+    CONFIG_ENTRY (not INTEGRATION) is the disabler meant for this: Home Assistant does not
+    schedule an extra reload of the entry when such an entity is enabled again.
+    """
     registry = er.async_get(hass)
     for known in er.async_entries_for_config_entry(registry, entry.entry_id):
         feature = feature_of(entry.entry_id, known.unique_id)
-        if feature is not None and not getattr(features, feature):
-            registry.async_remove(known.entity_id)
+        if feature is None:
+            continue
+        if not getattr(features, feature):
+            if known.disabled_by is None:
+                registry.async_update_entity(
+                    known.entity_id, disabled_by=er.RegistryEntryDisabler.CONFIG_ENTRY
+                )
+                # The reload that brought us here left an "unavailable, restored" state behind.
+                hass.states.async_remove(known.entity_id)
+        elif known.disabled_by is er.RegistryEntryDisabler.CONFIG_ENTRY:
+            registry.async_update_entity(known.entity_id, disabled_by=None)

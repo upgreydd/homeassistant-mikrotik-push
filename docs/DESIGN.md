@@ -61,6 +61,9 @@ and history; the traffic stream restarts when the set of port names changes. Ent
 longer exists stay unavailable until deleted by hand. A failing optional reading (no permission, a
 firmware without that command) is logged and dropped on its own; it never ends the session presence
 depends on. Readings are cleared when a new connection starts, because the router may have rebooted.
+The port list is re-read every 5 minutes like the presence tables (a speed change without a link change
+is not noticed until the next link change). Switching a feature off disables its entities (disabled by the
+config entry) instead of deleting them, so names, areas and dashboards survive switching it on again.
 Switches (NAT, filter, queues), kid control and scripts are not offered: they need write access.
 
 ## Entities
@@ -85,9 +88,16 @@ the script.
 ## Known limitations
 - Hosts without a DHCP lease (static IP, other VLAN relays) are not tracked.
 - Hosts behind a MAC-rewriting repeater, or on routed ports, are never "connected" (not on the bridge).
-- MAC randomisation creates a new tracker per random MAC; there is no cleanup of old ones yet.
+- MAC randomisation creates a new tracker per random MAC. Trackers Home Assistant disabled by default
+  (nobody named the host) are deleted at a reconnect when the host has no lease and the entry was not
+  touched for 30 days (the registry keeps no "last seen" time; a returning host gets its tracker back, disabled as before).
 - Certificate verification only works with a certificate the system trusts; the generated self-signed
-  certificate needs "verify" off (encrypted, but the router is not authenticated). Pinning is planned.
+  certificate needs "verify" off. The fingerprint of the certificate seen on the first successful connection
+  is pinned (stored in the entry; entries from before pinning existed get theirs at their next start). A
+  different certificate is refused before the login is sent. Reauth then shows the new fingerprint and
+  trusts it only after a second submit; a reauth for a rejected password keeps the pin. The very first
+  connection is not authenticated (trust on first use). A certificate that changes by itself (for example
+  an ACME one on api-ssl) needs that confirmation at every renewal: use the generated CA-signed one.
 - The 180 s grace and 5 min resync are constants, not options.
 - Not yet measured: events at AP reboot / port flap and sleeping phones over a long period.
 - Departure is slow by design (about 5-8 min): the bridge ageing time plus the grace.
@@ -95,7 +105,6 @@ the script.
 
 ## Roadmap
 1. Long capture on the real router (AP reboot, sleeping phones) and tune the grace.
-2. Options flow (grace, which VLANs/bridges to track), certificate pinning, diagnostics, cleanup of old
-   randomised-MAC trackers, minimum RouterOS version check, Wi-Fi registration table as a faster signal.
+2. Options flow (grace, which VLANs/bridges to track), diagnostics, minimum RouterOS version check, Wi-Fi registration table as a faster signal.
 3. Interface/WAN state and system sensors, `update` entity; netwatch webhook push.
 4. Release tag equal to the manifest version, submit to `hacs/default`.

@@ -3,6 +3,8 @@
 import asyncio
 import importlib.util
 import pathlib
+import ssl
+import subprocess
 
 # Loaded by path so this file works with and without the integration package importable.
 _WIRE_PATH = (
@@ -26,6 +28,8 @@ class FakeRouter:
         self.ethernet_monitor: dict[str, dict[str, str]] = {}  # port name -> `monitor once` row
         self.login_failure = "invalid user name or password (6)"
         self.muted = False  # swallow every command, like a half-dead link
+        self.ignored_commands: set[str] = set()  # commands that never get an answer
+        self.failing_commands: set[str] = set()  # commands answered with a trap
         self.login_count = 0
         self.cancelled_tags: list[str] = []
         self.stream_requests: list[tuple[str, dict[str, str]]] = []  # (command, attributes)
@@ -33,8 +37,8 @@ class FakeRouter:
         self._subscriptions: list[tuple[asyncio.StreamWriter, str, str]] = []
         self._server: asyncio.Server | None = None
 
-    async def start(self) -> int:
-        self._server = await asyncio.start_server(self._serve, "127.0.0.1", 0)
+    async def start(self, ssl_context: ssl.SSLContext | None = None) -> int:
+        self._server = await asyncio.start_server(self._serve, "127.0.0.1", 0, ssl=ssl_context)
         return self._server.sockets[0].getsockname()[1]
 
     def stop(self) -> None:
@@ -66,12 +70,18 @@ class FakeRouter:
                 if not self.muted:
                     self._handle(writer, command, tag, attrs)
                     await writer.drain()
-        except (asyncio.IncompleteReadError, ConnectionError):
+        except (asyncio.IncompleteReadError, OSError):  # includes a TLS shutdown gone wrong
             pass
         finally:
             writer.close()  # like a real server: hang up when the client has gone
 
     def _handle(self, writer, command: str, tag: str, attrs: dict[str, str]) -> None:
+        if command in self.ignored_commands:
+            return
+        if command in self.failing_commands:
+            _reply(writer, tag, "!trap", {"message": "failure: simulated"})
+            _reply(writer, tag, "!done")
+            return
         if command == "/login":
             self.login_count += 1
             if attrs.get("password") == self.password:
@@ -129,3 +139,29 @@ async def until(condition, timeout: float = 3) -> None:
     async with asyncio.timeout(timeout):
         while not condition():
             await asyncio.sleep(0.01)
+
+
+def make_self_signed_certificate(directory: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """A throwaway certificate for 127.0.0.1, made with the openssl command line tool."""
+    certificate, key = directory / "router.pem", directory / "router.key"
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+         "-subj", "/CN=127.0.0.1", "-keyout", str(key), "-out", str(certificate)],
+        check=True, capture_output=True,
+    )
+    return certificate, key
+
+
+def certificate_sha256(certificate: pathlib.Path) -> str:
+    """The fingerprint as openssl prints it, so the code under test is not checked against itself."""
+    out = subprocess.run(
+        ["openssl", "x509", "-in", str(certificate), "-noout", "-fingerprint", "-sha256"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    return out.split("=", 1)[1].strip().replace(":", "").lower()
+
+
+def server_ssl_context(certificate: pathlib.Path, key: pathlib.Path) -> ssl.SSLContext:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certificate, key)
+    return context

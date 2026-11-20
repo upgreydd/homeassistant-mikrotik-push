@@ -30,8 +30,13 @@ removed), Home Assistant starts a re-authentication that shows a fresh script an
 
 ## TLS notes
 - api-ssl needs a certificate; without one the handshake fails.
-- The default is "TLS on, verify off": the traffic is encrypted but the router is not authenticated, so an
-  attacker who can intercept LAN traffic could capture the one-time password. Certificate pinning is planned.
+- The default is "TLS on, verify off" with the certificate pinned on first use: the first connection is
+  encrypted but the router is not authenticated, so an attacker who can intercept LAN traffic exactly then
+  could capture the one-time password. Every later connection must present the same certificate, and a
+  different one is refused before the password is sent. Home Assistant then asks you to sign in again and
+  shows the new fingerprint; compare it with `/certificate print detail` and confirm only if you replaced
+  the certificate yourself. Entries created before pinning existed pin the certificate they see at their
+  next start.
 - "Verify" only works with a certificate the Home Assistant system trusts.
 
 ## Credentials at rest

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.components.device_tracker import DOMAIN as DEVICE_TRACKER_DOMAIN
@@ -10,10 +11,17 @@ from homeassistant.components.device_tracker import ScannerEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from . import MikrotikPushConfigEntry
 from .registry import Host
 from .watcher import Change, RouterWatcher
+
+
+# A tracker Home Assistant disabled by default (nobody named the host), that nobody touched for this
+# long and whose host has no lease at a reconnect, is forgotten: phones with a rotating Wi-Fi
+# address would otherwise fill the registry.
+STALE_AFTER = timedelta(days=30)
 
 
 async def async_setup_entry(
@@ -36,6 +44,8 @@ async def async_setup_entry(
     def track_new_hosts(change: Change) -> None:
         # After a (re)connect, look at every host: an earlier half-finished snapshot may have
         # put a host into the registry without anybody hearing about it.
+        if change.link and watcher.connected:
+            tracked.difference_update(_forget_stale_hosts(hass, entry, watcher))
         macs = watcher.registry.hosts.keys() if change.link else change.macs
         track({mac: watcher.registry.hosts[mac].name for mac in macs if mac in watcher.registry.hosts})
 
@@ -51,6 +61,28 @@ async def async_setup_entry(
         }
     )
     entry.async_on_unload(watcher.add_listener(track_new_hosts))
+
+
+@callback
+def _forget_stale_hosts(
+    hass: HomeAssistant, entry: MikrotikPushConfigEntry, watcher: RouterWatcher
+) -> set[str]:
+    """Remove long-untouched, unnamed trackers of absent hosts; return their MACs."""
+    forgotten: set[str] = set()
+    registry = er.async_get(hass)
+    cutoff = dt_util.utcnow() - STALE_AFTER
+    prefix = f"{entry.entry_id}_"
+    for known in er.async_entries_for_config_entry(registry, entry.entry_id):
+        mac = known.unique_id.removeprefix(prefix)
+        if (
+            known.domain == DEVICE_TRACKER_DOMAIN
+            and known.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+            and mac not in watcher.registry.hosts
+            and known.modified_at < cutoff
+        ):
+            registry.async_remove(known.entity_id)
+            forgotten.add(mac)
+    return forgotten
 
 
 class HostTracker(ScannerEntity):

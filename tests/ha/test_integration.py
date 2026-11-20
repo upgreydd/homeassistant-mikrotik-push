@@ -1,8 +1,11 @@
 """Config flow and device tracker inside Home Assistant."""
 
+from datetime import timedelta
+from unittest.mock import patch
+
 import pytest
 from fake_router import until
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from custom_components.mikrotik_push.const import DOMAIN
 from homeassistant.config_entries import ConfigEntryState
@@ -14,6 +17,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
+from homeassistant.util import dt as dt_util
 
 PHONE_MAC = "AA:BB:CC:DD:EE:01"
 PHONE = "device_tracker.phone"
@@ -449,4 +453,107 @@ async def test_the_update_entity_is_unknown_until_the_router_has_checked(
     await until(lambda: state_of(hass, entry, "update", "system_update").state != "unavailable")
 
     assert state_of(hass, entry, "update", "system_update").state == "unknown"
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_switching_a_feature_off_and_on_keeps_what_the_user_did_to_its_entities(
+    hass: HomeAssistant, full_entry
+):
+    await until(lambda: state_of(hass, full_entry, "sensor", "port_ether1_speed"))
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id(
+        "sensor", DOMAIN, f"{full_entry.entry_id}_port_ether1_speed"
+    )
+    registry.async_update_entity(entity_id, new_entity_id="sensor.wan_speed", name="WAN speed")
+
+    form = await hass.config_entries.options.async_init(full_entry.entry_id)
+    await hass.config_entries.options.async_configure(
+        form["flow_id"], {**ALL_FEATURES, "track_ports": False}
+    )
+    await hass.async_block_till_done()
+
+    assert registry.async_get("sensor.wan_speed").disabled_by is er.RegistryEntryDisabler.CONFIG_ENTRY
+    assert hass.states.get("sensor.wan_speed") is None
+
+    form = await hass.config_entries.options.async_init(full_entry.entry_id)
+    with patch.object(
+        hass.config_entries, "async_schedule_reload", wraps=hass.config_entries.async_schedule_reload
+    ) as reload:
+        await hass.config_entries.options.async_configure(form["flow_id"], ALL_FEATURES)
+        await hass.async_block_till_done()
+        await until(lambda: hass.states.get("sensor.wan_speed"))
+        reloads_for_the_options_change = reload.call_count
+
+        # Enabling an entity from the registry makes Home Assistant reload the entry 30 s later,
+        # unless it was disabled by the config entry itself.
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=45))
+        await hass.async_block_till_done()
+
+        assert reload.call_count == reloads_for_the_options_change
+    assert registry.async_get("sensor.wan_speed").name == "WAN speed"
+    assert registry.async_get("sensor.wan_speed").disabled_by is None
+
+
+async def test_setup_is_retried_when_the_router_stops_answering(
+    hass: HomeAssistant, router, monkeypatch
+):
+    monkeypatch.setattr("custom_components.mikrotik_push.REQUEST_TIMEOUT", 0.3)
+    router.ignored_commands.add("/system/resource/print")
+    entry = MockConfigEntry(domain=DOMAIN, data=entry_data(router), unique_id="SN123")
+    entry.add_to_hass(hass)
+
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+
+
+async def test_flow_reports_cannot_connect_when_the_router_stops_answering(
+    hass: HomeAssistant, router, monkeypatch
+):
+    monkeypatch.setattr("custom_components.mikrotik_push.config_flow.REQUEST_TIMEOUT", 0.3)
+    router.ignored_commands.add("/system/resource/print")
+    result = await start_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_HOST: "127.0.0.1"}
+    )
+    user_input = {k: v for k, v in entry_data(router).items() if k != CONF_HOST}
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input)
+
+    assert result["errors"] == {"base": "cannot_connect"}
+
+
+async def test_old_hosts_nobody_named_are_forgotten_once_the_router_lists_none_of_them(
+    hass: HomeAssistant, router, monkeypatch
+):
+    monkeypatch.setattr("custom_components.mikrotik_push.device_tracker.STALE_AFTER", timedelta(0))
+    entry = MockConfigEntry(domain=DOMAIN, data=entry_data(router), unique_id="SN123")
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+
+    def register(mac, **options):
+        return registry.async_get_or_create(
+            "device_tracker", DOMAIN, f"{entry.entry_id}_{mac}", config_entry=entry, **options
+        )
+
+    stale = register("AA:BB:CC:00:00:99", disabled_by=er.RegistryEntryDisabler.INTEGRATION)
+    chosen = register("AA:BB:CC:00:00:98")  # enabled: somebody cares about this one
+    leased = register(PHONE_MAC, disabled_by=er.RegistryEntryDisabler.INTEGRATION)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    await until(lambda: registry.async_get(stale.entity_id) is None)
+    assert registry.async_get(chosen.entity_id) is not None
+    assert registry.async_get(leased.entity_id) is not None  # the router still lists a lease
+
+    await router.push(
+        "/ip/dhcp-server/lease",
+        {".id": "*9", "mac-address": "AA:BB:CC:00:00:99", "address": "10.0.0.9", "status": "bound",
+         "host-name": "returner", "comment": "Returner"},
+    )
+    # A forgotten host that returns gets a tracker again (Home Assistant restores its old flags).
+    await until(
+        lambda: registry.async_get_entity_id("device_tracker", DOMAIN, f"{entry.entry_id}_AA:BB:CC:00:00:99")
+    )
     await hass.config_entries.async_unload(entry.entry_id)

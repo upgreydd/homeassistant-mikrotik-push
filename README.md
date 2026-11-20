@@ -18,9 +18,11 @@ disabled, as Home Assistant does for unknown devices; enable the ones you want.
     showing the installed and the latest RouterOS version the router knows of (it is read-only: no install).
 
 The router pushes all of this over the one connection Home Assistant keeps open (see
-[docs/DESIGN.md](docs/DESIGN.md)); nothing is polled except temperatures (once a minute) and the update
-status (every 6 hours). Measured on an RB5009 with every port streaming: no change in router CPU, about
-13 kbit/s of traffic.
+[docs/DESIGN.md](docs/DESIGN.md)). No state is polled in a cycle except temperatures (once a minute) and
+the update status (every 6 hours). Two safety checks run besides: a 30 s keepalive and a full re-read of
+the lease and host tables (and of the port list while ports or traffic are on) every 5 minutes,
+which repair a stream that silently stopped. Measured on
+an RB5009 with every port streaming: no change in router CPU, about 13 kbit/s of traffic.
 
 ### History in the database
 Traffic and system values change every few seconds. They have no `state_class` (so no long-term

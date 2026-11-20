@@ -7,8 +7,13 @@ TESTS_DIR = pathlib.Path(__file__).parents[1]
 sys.path.insert(0, str(TESTS_DIR))
 sys.path.insert(0, str(TESTS_DIR.parent))  # makes `custom_components` importable
 
-import pytest  # noqa: E402
-from fake_router import FakeRouter  # noqa: E402
+import pytest
+from fake_router import (
+    FakeRouter,
+    certificate_sha256,
+    make_self_signed_certificate,
+    server_ssl_context,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -16,9 +21,7 @@ def _enable_custom_integrations(enable_custom_integrations):
     """Let Home Assistant load custom_components/ from the repository."""
 
 
-@pytest.fixture
-async def router(socket_enabled):
-    fake = FakeRouter()
+def populate(fake: FakeRouter) -> None:
     fake.tables.update(
         {
             "/ip/dhcp-server/lease": [
@@ -45,6 +48,24 @@ async def router(socket_enabled):
         }
     )
     fake.ethernet_monitor["ether1"] = {"name": "ether1", "status": "link-ok", "rate": "1Gbps"}
+
+
+@pytest.fixture
+async def router(socket_enabled):
+    fake = FakeRouter()
+    populate(fake)
     fake.port = await fake.start()
+    yield fake
+    fake.stop()
+
+
+@pytest.fixture
+async def tls_router(socket_enabled, tmp_path):
+    """Like `router`, but over TLS with a self-signed certificate (what api-ssl presents)."""
+    certificate, key = make_self_signed_certificate(tmp_path)
+    fake = FakeRouter()
+    populate(fake)
+    fake.certificate_sha256 = certificate_sha256(certificate)
+    fake.port = await fake.start(server_ssl_context(certificate, key))
     yield fake
     fake.stop()

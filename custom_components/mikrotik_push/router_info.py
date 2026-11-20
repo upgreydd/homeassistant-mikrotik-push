@@ -1,4 +1,4 @@
-"""What the router says about itself once per connection: model, version, memory, uptime."""
+"""What the router says about itself once per connection: name, model, serial number, version."""
 
 from __future__ import annotations
 

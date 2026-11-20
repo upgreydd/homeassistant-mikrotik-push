@@ -21,7 +21,7 @@
       },
       "reauth_confirm": {
         "title": "Sign in again",
-        "description": "The router rejected the saved password. Home Assistant is now seen as {ha_address}; if that changed, the old user is bound to the old address. Copy the script below, paste it into a RouterOS terminal to reset the user, then press Submit.",
+        "description": "The router rejected the saved password, or presents a different certificate than before. Home Assistant is now seen as {ha_address}; if that changed, the old user is bound to the old address. Copy the script below, paste it into a RouterOS terminal to reset the user, then press Submit. A changed certificate is trusted only after you have seen its fingerprint and submitted again.",
         "data": {
           "password": "Password",
           "setup_script": "Router setup script"
@@ -32,6 +32,7 @@
       "invalid_host": "Use an IP address or host name without spaces or quotes.",
       "cannot_connect": "Cannot connect. Check the address, port, TLS setting, and that the API service allows this Home Assistant address.",
       "invalid_auth": "The router rejected the user name or password. If you used the script, check that the router sees Home Assistant at the address named above.",
+      "certificate_changed": "The router presents a different certificate than the one trusted before (SHA-256 {fingerprint}); the password was not sent. If you did not replace the certificate yourself, stop here: another device may be answering on the router's address. Otherwise compare this fingerprint with `/certificate print detail` on the router and press Submit again to trust it.",
       "router_error": "The router refused a read of the DHCP lease or bridge host tables. The user needs the read and api policies.",
       "unknown": "Unexpected error, see the Home Assistant log."
     },

@@ -37,15 +37,18 @@ class Harness:
     def __init__(self, router, timing):
         self.router = router
         self.login_rejected_calls = 0
-        self.watcher = RouterWatcher(self._connect, self._on_login_rejected, timing)
+        self.connect_error: Exception | None = None  # what the next reconnect fails with
+        self.watcher = RouterWatcher(self._connect, self._on_access_refused, timing)
         self.task = None
 
     async def _connect(self):
+        if self.connect_error:
+            raise self.connect_error
         return await routeros.RouterOSConnection.open(
             "127.0.0.1", self.router.port, "user", "secret", timeout=1
         )
 
-    def _on_login_rejected(self):
+    def _on_access_refused(self):
         self.login_rejected_calls += 1
 
     async def start(self):
@@ -162,6 +165,19 @@ async def test_rejected_login_on_reconnect_stops_retrying_and_asks_for_reauth(ro
     router.drop_connections()
     await until(lambda: harness.login_rejected_calls == 1)
     await asyncio.wait_for(harness.task, 2)  # run() returned instead of retrying forever
+    assert not harness.watcher.connected
+
+
+async def test_a_changed_certificate_on_reconnect_stops_retrying_and_asks_for_reauth(
+    router, start_watcher
+):
+    harness = await start_watcher()
+    await until(lambda: harness.watcher.connected)
+
+    harness.connect_error = routeros.CertificateChanged("ab" * 32)
+    router.drop_connections()
+    await until(lambda: harness.login_rejected_calls == 1)
+    await asyncio.wait_for(harness.task, 2)
     assert not harness.watcher.connected
 
 
