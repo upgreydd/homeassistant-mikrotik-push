@@ -55,6 +55,20 @@ def test_server_certificate_is_signed_by_a_local_ca_that_is_signed_first():
     assert 'find name="mikrotik-push-api" private-key=yes' in line  # a failed attempt is redone
 
 
+def test_a_daily_update_check_is_scheduled_once_and_run_now():
+    lines = build().splitlines()
+    scheduler = next(line for line in lines if "/system scheduler add" in line)
+    assert scheduler.startswith(':if ([:len [/system scheduler find name="mikrotik-push-update-check"]] = 0)')
+    assert "interval=1d" in scheduler and "check-for-updates" in scheduler
+    assert any(line.startswith(":do { /system package update check-for-updates }") for line in lines)
+
+
+def test_the_update_check_does_not_widen_the_api_users_policies():
+    assert "policy=read,api" in build()
+    api_group_line = next(l for l in build().splitlines() if "/user group add" in l)
+    assert "write" not in api_group_line
+
+
 def test_password_appears_only_inside_the_user_commands():
     assert build().count("pw-123") == 2
 

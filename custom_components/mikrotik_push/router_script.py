@@ -13,6 +13,8 @@ import secrets
 DEFAULT_USERNAME = "mikrotik-push"
 CERTIFICATE_NAME = "mikrotik-push-api"
 CA_NAME = "mikrotik-push-ca"
+UPDATE_CHECK_NAME = "mikrotik-push-update-check"
+UPDATE_CHECK_COMMAND = "/system package update check-for-updates"
 COMMENT = "Home Assistant (MikroTik Push)"
 POLICY = "read,api"
 
@@ -74,6 +76,11 @@ def build_setup_script(
             f'key-usage=tls-server; /certificate sign "{CERTIFICATE_NAME}" ca="{CA_NAME}"; :delay 5s; '
             f'/ip service set api-ssl certificate="{CERTIFICATE_NAME}" }}',
             "/ip service set api-ssl disabled=no",
+            "# The router only learns of new RouterOS versions when told to look; do it daily.",
+            f':if ([:len [/system scheduler find name="{UPDATE_CHECK_NAME}"]] = 0) do={{ '
+            f'/system scheduler add name="{UPDATE_CHECK_NAME}" interval=1d policy=read,write,test '
+            f'comment="{COMMENT}" on-event="{UPDATE_CHECK_COMMAND}" }}',
+            f":do {{ {UPDATE_CHECK_COMMAND} }} on-error={{}}",
         ]
     )
 
