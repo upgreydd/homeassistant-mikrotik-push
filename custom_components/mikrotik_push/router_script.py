@@ -12,6 +12,7 @@ import secrets
 
 DEFAULT_USERNAME = "mikrotik-push"
 CERTIFICATE_NAME = "mikrotik-push-api"
+CA_NAME = "mikrotik-push-ca"
 COMMENT = "Home Assistant (MikroTik Push)"
 POLICY = "read,api"
 
@@ -63,10 +64,14 @@ def build_setup_script(
             f'comment="{COMMENT}" }} else={{ '
             f'/user set [/user find name="{username}"] group="{username}" '
             f'password="{password}"{only_from} }}',
-            "# api-ssl needs a certificate. Skip the next two lines if it already has one you trust.",
-            f':if ([:len [/certificate find name="{CERTIFICATE_NAME}"]] = 0) do={{ '
+            "# api-ssl needs a certificate: a local CA signs one for this router (skipped once it exists).",
+            f':if ([:len [/certificate find name="{CERTIFICATE_NAME}" private-key=yes]] = 0) do={{ '
+            f'/certificate remove [find name="{CERTIFICATE_NAME}"]; '
+            f'/certificate remove [find name="{CA_NAME}"]; '
+            f'/certificate add name="{CA_NAME}" common-name="{CA_NAME}" days-valid=3650 '
+            f'key-usage=key-cert-sign,crl-sign; /certificate sign "{CA_NAME}"; :delay 5s; '
             f'/certificate add name="{CERTIFICATE_NAME}" common-name="{host}" days-valid=3650 '
-            f'key-usage=tls-server; /certificate sign "{CERTIFICATE_NAME}"; :delay 10s; '
+            f'key-usage=tls-server; /certificate sign "{CERTIFICATE_NAME}" ca="{CA_NAME}"; :delay 5s; '
             f'/ip service set api-ssl certificate="{CERTIFICATE_NAME}" }}',
             "/ip service set api-ssl disabled=no",
         ]

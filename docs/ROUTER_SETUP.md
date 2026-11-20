@@ -8,8 +8,9 @@ Terminal), then press Submit. The script:
 - creates (or updates) the group `mikrotik-push` with **only `read` and `api`** (the built-in `read` group
   also has `sensitive`, `reboot`, `ssh`, `winbox`, `web`...);
 - creates (or updates) the user `mikrotik-push`, allowed to log in **only from the Home Assistant address**;
-- creates a self-signed certificate and assigns it to the `api-ssl` service (port 8729), but only when it
-  has not created that certificate before, so an existing certificate setup is never overwritten;
+- creates a local CA (`mikrotik-push-ca`) and a server certificate signed by it, assigns that to the
+  `api-ssl` service (port 8729), but only when it has not created a working one before, so an existing
+  certificate setup is never overwritten (a half-finished attempt of ours is removed and redone);
 - enables `api-ssl`.
 
 Pasting it again rotates the password. When the router rejects the login later (password changed, user

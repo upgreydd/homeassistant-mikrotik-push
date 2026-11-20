@@ -47,6 +47,14 @@ def test_existing_api_ssl_certificate_is_only_replaced_when_our_own_is_created()
     )
 
 
+def test_server_certificate_is_signed_by_a_local_ca_that_is_signed_first():
+    line = next(l for l in build().splitlines() if "/certificate sign" in l)
+    ca_signed = line.index('/certificate sign "mikrotik-push-ca"')
+    leaf_signed = line.index('/certificate sign "mikrotik-push-api" ca="mikrotik-push-ca"')
+    assert ca_signed < leaf_signed
+    assert 'find name="mikrotik-push-api" private-key=yes' in line  # a failed attempt is redone
+
+
 def test_password_appears_only_inside_the_user_commands():
     assert build().count("pw-123") == 2
 
