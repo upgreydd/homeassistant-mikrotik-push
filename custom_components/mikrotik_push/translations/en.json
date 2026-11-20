@@ -3,23 +3,40 @@
     "step": {
       "user": {
         "title": "Connect to a MikroTik router",
-        "description": "Create the read-only API user first (see docs/ROUTER_SETUP.md).",
         "data": {
-          "host": "Host",
-          "port": "API port (8729 = api-ssl, 8728 = plain api)",
+          "host": "Router address (IP or name)"
+        }
+      },
+      "credentials": {
+        "title": "Prepare the router and sign in",
+        "description": "Paste this into a RouterOS terminal on the router (WinBox: New Terminal). It creates a read-only user for Home Assistant, limited to the address {ha_address}, with the one-time password below, and enables api-ssl. Then press Submit.\n\n```\n{script}\n```",
+        "data": {
           "username": "Username",
           "password": "Password",
+          "port": "API port (8729 = api-ssl, 8728 = plain api)",
           "ssl": "Use TLS (api-ssl)",
-          "verify_ssl": "Verify the router certificate"
+          "verify_ssl": "Verify the router certificate (needs a CA-signed certificate)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Sign in again",
+        "description": "The router rejected the saved password. Home Assistant is now seen as {ha_address}; if that changed, the old user is bound to the old address. Paste this script into a RouterOS terminal to reset the user, then press Submit.\n\n```\n{script}\n```",
+        "data": {
+          "password": "Password"
         }
       }
     },
     "error": {
-      "cannot_connect": "Cannot connect. Check the host, port, TLS setting and that the API service is enabled for this IP.",
-      "invalid_auth": "The router rejected the user name or password."
+      "invalid_host": "Use an IP address or host name without spaces or quotes.",
+      "cannot_connect": "Cannot connect. Check the address, port, TLS setting, and that the API service allows this Home Assistant address.",
+      "invalid_auth": "The router rejected the user name or password. If you used the script, check that the router sees Home Assistant at the address named above.",
+      "router_error": "The router refused a read of the DHCP lease or bridge host tables. The user needs the read and api policies.",
+      "unknown": "Unexpected error, see the Home Assistant log."
     },
     "abort": {
-      "already_configured": "This router is already configured."
+      "already_configured": "This router is already configured.",
+      "reauth_successful": "Signed in again.",
+      "unique_id_mismatch": "This is a different router than the one this entry was set up for."
     }
   }
 }

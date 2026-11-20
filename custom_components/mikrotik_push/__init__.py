@@ -2,49 +2,45 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import (
-    CONF_HOST,
-    CONF_PASSWORD,
-    CONF_PORT,
-    CONF_SSL,
-    CONF_USERNAME,
-    CONF_VERIFY_SSL,
-)
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
-from .routeros import ConnectionLost, RouterOSConnection, RouterOSError
+from .connection import open_connection
+from .const import DOMAIN
+from .routeros import LoginRejected, RouterOSError
+from .watcher import RouterWatcher
 
-type MikrotikPushConfigEntry = ConfigEntry[RouterOSConnection]
+type MikrotikPushConfigEntry = ConfigEntry[RouterWatcher]
 
-# Platforms (device_tracker, binary_sensor, sensor, update) are added in the next milestone.
-PLATFORMS: list = []
+PLATFORMS = [Platform.DEVICE_TRACKER]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: MikrotikPushConfigEntry) -> bool:
-    d = entry.data
+    connect = partial(open_connection, entry.data)
     try:
-        conn = await RouterOSConnection.open(
-            d[CONF_HOST],
-            d[CONF_PORT],
-            d[CONF_USERNAME],
-            d[CONF_PASSWORD],
-            use_ssl=d[CONF_SSL],
-            verify_ssl=d[CONF_VERIFY_SSL],
-        )
-    except (ConnectionLost, OSError, TimeoutError) as err:
-        raise ConfigEntryNotReady(f"Cannot reach {d[CONF_HOST]}: {err}") from err
-    except RouterOSError as err:
-        # No reauth flow yet: the user fixes credentials by removing and re-adding the entry.
-        raise ConfigEntryError(f"Login rejected: {err}") from err
-    entry.runtime_data = conn
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        connection = await connect()
+    except LoginRejected as error:
+        raise ConfigEntryAuthFailed(f"Login rejected: {error}") from error
+    except (RouterOSError, OSError, TimeoutError) as error:
+        raise ConfigEntryNotReady(f"Cannot reach the router: {error}") from error
+
+    watcher = RouterWatcher(connect, on_login_rejected=lambda: entry.async_start_reauth(hass))
+    entry.runtime_data = watcher
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except BaseException:
+        await connection.close()
+        raise
+    entry.async_create_background_task(
+        hass, watcher.run(connection), f"{DOMAIN}_{entry.entry_id}_watcher"
+    )
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: MikrotikPushConfigEntry) -> bool:
-    ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if ok:
-        await entry.runtime_data.close()
-    return ok
+    entry.runtime_data.stop()  # first, so no event reaches a platform that is being torn down
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

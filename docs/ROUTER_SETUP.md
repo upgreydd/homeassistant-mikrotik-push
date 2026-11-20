@@ -1,48 +1,35 @@
 # Router setup (RouterOS 7)
 
-What the integration needs from the router, nothing more.
+## The easy way: let the integration generate the commands
+Add the integration, enter the router's address, and the next screen shows a ready-to-paste script with a
+**one-time random password** already filled into the form. Paste it into a RouterOS terminal (WinBox: New
+Terminal), then press Submit. The script:
 
-## 1. A read-only API user (required)
+- creates (or updates) the group `mikrotik-push` with **only `read` and `api`** (the built-in `read` group
+  also has `sensitive`, `reboot`, `ssh`, `winbox`, `web`...);
+- creates (or updates) the user `mikrotik-push`, allowed to log in **only from the Home Assistant address**;
+- creates a self-signed certificate and assigns it to the `api-ssl` service (port 8729), but only when it
+  has not created that certificate before, so an existing certificate setup is never overwritten;
+- enables `api-ssl`.
 
-Paste `docs/router/setup.rsc` (after replacing `HA_IP` and the password), or by hand:
+Pasting it again rotates the password. When the router rejects the login later (password changed, user
+removed), Home Assistant starts a re-authentication that shows a fresh script and password. The policies it uses are enough for `print` and `listen`
+(verified on RouterOS 7.25.1); if RouterOS answers "not enough permissions (9)" the integration reports
+`router_error` and says which user to check.
 
-```
-/user/group add name=ha-readonly policy=read,api
-/user add name=ha group=ha-readonly password="..." address=<HA_IP>/32
-```
+## What you still do yourself
+- **Firewall:** allow TCP 8729 (or 8728) to the router from Home Assistant in the `input` chain.
+- **Static address for Home Assistant:** the user is bound to its IP; if the address changes, logins fail and
+  Home Assistant asks for the password again.
+- **Plain API:** `/ip service set api disabled=yes` once nothing else uses port 8728 (it sends passwords in
+  clear text).
 
-Why a new group: the built-in `read` group also contains `sensitive`, `reboot`, `ssh`, `winbox`, `web`
-and more. `read,api` is enough for `print`, `listen` and the system queries we use (to be confirmed on your
-router in milestone 1; if RouterOS answers "not enough permissions (9)" we add exactly the missing policy).
-The `address=` restriction means the account is useless from anywhere except the HA host.
+## TLS notes
+- api-ssl needs a certificate; without one the handshake fails.
+- The default is "TLS on, verify off": the traffic is encrypted but the router is not authenticated, so an
+  attacker who can intercept LAN traffic could capture the one-time password. Certificate pinning is planned.
+- "Verify" only works with a certificate the Home Assistant system trusts.
 
-## 2. API service (required)
-
-| Service | Port | Use |
-|---|---|---|
-| `api-ssl` | 8729 | recommended; needs a certificate to be verifiable (the `.rsc` makes a self-signed one) |
-| `api` | 8728 | works, but the password travels in cleartext; restrict by `address=` |
-
-`/ip/service print` shows the state. Also allow the port in the firewall input chain from HA only.
-
-## Verified on the real router (2026-11-20, RB5009UG+S+, RouterOS 7.25.1)
-- Login with a group of `read,api` (the live group also had `reboot,policy,test`, which are NOT needed).
-- `print` works for identity, resource, routerboard, package, health, dhcp-server, dhcp lease, arp.
-- `listen` is accepted (no trap) on `/ip/dhcp-server/lease`, `/ip/arp`, `/interface`,
-  `/interface/bridge/host`, `/ip/neighbor`. This router has no Wi-Fi (`/interface/wifi` is empty).
-- api-ssl (8729) fails the TLS handshake while no certificate is assigned; use the certificate step in
-  `setup.rsc` or the plain API (8728) on a trusted LAN.
-
-## 3. Optional, later milestones (not needed for milestone 1)
-
-- WAN / host up-down push: a `/tool/netwatch` entry with `up-script`/`down-script` that POSTs to an HA
-  webhook with `/tool/fetch`. The script runs with its own policy list, not the API user's. Which policies
-  fetch needs is not stated in the official docs (sources disagree on `ftp`), so it will be verified on the
-  real router before we document it.
-- Router logs via remote syslog to an HA-side UDP listener.
-
-## What I need from you to start milestone 1
-
-1. Run the `.rsc`, then give me the host, port, user and password (via a secret, not chat if you can avoid it).
-2. Output of `/system/resource print`, `/system/package print`, and `/interface/wifi print` or
-   `/interface/wireless print` (whichever exists), so I know the RouterOS version and wifi stack.
+## Credentials at rest
+Home Assistant stores the password in `.storage/core.config_entries` and in backups. That is why the user
+has read-only rights and a source-address restriction.
