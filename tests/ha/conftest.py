@@ -29,9 +29,22 @@ async def router(socket_enabled):
                 {".id": "*B1", "mac-address": "AA:BB:CC:DD:EE:01", "on-interface": "ether3",
                  "dynamic": "true", "local": "false"},
             ],
-            "/system/routerboard": [{"serial-number": "SN123"}],
+            "/system/routerboard": [{"serial-number": "SN123", "model": "RB-TEST"}],
+            "/system/resource": [
+                {"uptime": "1d", "total-memory": "1048576000", "version": "7.25.1",
+                 "board-name": "RB-TEST"}
+            ],
+            "/system/package/update": [
+                {"installed-version": "7.25.1", "latest-version": "7.26", "status": "New"}
+            ],
+            "/system/health": [{".id": "*1", "name": "cpu-temperature", "value": "51", "type": "C"}],
+            "/interface": [
+                {".id": "*1", "name": "ether1", "type": "ether", "running": "true"},
+                {".id": "*2", "name": "ether2", "type": "ether", "running": "false"},
+            ],
         }
     )
+    fake.ethernet_monitor["ether1"] = {"name": "ether1", "status": "link-ok", "rate": "1Gbps"}
     fake.port = await fake.start()
     yield fake
     fake.stop()

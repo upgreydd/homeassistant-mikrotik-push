@@ -9,7 +9,13 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.components.network import async_get_source_ip
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+    OptionsFlowWithReload,
+)
 from homeassistant.const import (
     CONF_HOST,
     CONF_PASSWORD,
@@ -20,10 +26,28 @@ from homeassistant.const import (
 )
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.selector import TextSelector, TextSelectorConfig, TextSelectorType
+from homeassistant.core import callback
+from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 
 from .connection import open_connection
-from .const import DEFAULT_PORT, DOMAIN, IDENTITY_PATH
+from .const import (
+    CONF_TRACK_PORTS,
+    CONF_TRACK_SYSTEM,
+    CONF_TRACK_TRAFFIC,
+    CONF_UPDATE_INTERVAL,
+    DEFAULT_PORT,
+    DEFAULT_UPDATE_INTERVAL,
+    DOMAIN,
+    MAX_UPDATE_INTERVAL,
+    MIN_UPDATE_INTERVAL,
+)
 from .router_script import (
     DEFAULT_USERNAME,
     build_setup_script,
@@ -31,6 +55,7 @@ from .router_script import (
     is_plain,
     is_safe_host,
 )
+from .router_info import read_router_info
 from .routeros import ConnectionLost, LoginRejected, RouterOSError
 from .watcher import TABLE_PATHS
 
@@ -51,6 +76,11 @@ class MikrotikPushConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._host = ""
         self._password = generate_password()
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        return MikrotikPushOptionsFlow()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -150,10 +180,9 @@ async def _probe_router(data: Mapping[str, Any]) -> tuple[Probe | None, str]:
     try:
         connection = await open_connection(data)
         try:
-            identity = (await connection.call(IDENTITY_PATH))[0]["name"]
             for path in TABLE_PATHS.values():
                 await connection.call(f"{path}/print")
-            board = await connection.call("/system/routerboard/print")
+            info = await read_router_info(connection)
         finally:
             await connection.close()
     except LoginRejected:
@@ -165,5 +194,37 @@ async def _probe_router(data: Mapping[str, Any]) -> tuple[Probe | None, str]:
     except Exception:
         _LOGGER.exception("Unexpected error while probing the router")
         return None, "unknown"
-    serial = board[0].get("serial-number") if board else None
-    return (identity, serial or data[CONF_HOST]), ""
+    return (info.name, info.serial_number or data[CONF_HOST]), ""
+
+
+class MikrotikPushOptionsFlow(OptionsFlowWithReload):
+    """Choose the optional readings; everything is off until selected."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
+        options = self.config_entry.options
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_TRACK_PORTS, default=options.get(CONF_TRACK_PORTS, False)): bool,
+                    vol.Required(
+                        CONF_TRACK_TRAFFIC, default=options.get(CONF_TRACK_TRAFFIC, False)
+                    ): bool,
+                    vol.Required(CONF_TRACK_SYSTEM, default=options.get(CONF_TRACK_SYSTEM, False)): bool,
+                    vol.Required(
+                        CONF_UPDATE_INTERVAL,
+                        default=options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=MIN_UPDATE_INTERVAL,
+                            max=MAX_UPDATE_INTERVAL,
+                            step=1,
+                            unit_of_measurement="s",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                }
+            ),
+        )

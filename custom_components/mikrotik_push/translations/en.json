@@ -40,5 +40,19 @@
       "reauth_successful": "Signed in again.",
       "unique_id_mismatch": "This is a different router than the one this entry was set up for."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Choose what to receive",
+        "description": "Everything below is off until you select it. The router pushes the data over the existing connection, so it costs the router next to nothing. Traffic and system values change every few seconds: Home Assistant has no per-entity switch to stop recording them, so add `recorder: exclude: entity_globs:` for them in configuration.yaml if you do not want their history (see the README).",
+        "data": {
+          "track_ports": "Ports: link state and negotiated speed",
+          "track_traffic": "Traffic: receive and transmit rate per port",
+          "track_system": "System: CPU, memory, last boot, temperatures, RouterOS update",
+          "update_interval": "Seconds between state updates of traffic and system values"
+        }
+      }
+    }
   }
 }

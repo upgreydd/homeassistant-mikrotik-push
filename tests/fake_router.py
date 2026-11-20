@@ -13,16 +13,22 @@ wire = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(wire)
 
 
+# Commands that stream forever like `listen`, but are not `<path>/listen`.
+STREAMING_COMMANDS = {"/interface/monitor-traffic", "/system/resource/monitor"}
+
+
 class FakeRouter:
     def __init__(self, password: str = "secret") -> None:
         self.password = password
         self.tables: dict[str, list[dict[str, str]]] = {"/system/identity": [{"name": "fake"}]}
         self.reject_listen: set[str] = set()  # paths answering `listen` with a permission trap
         self.end_listen: set[str] = set()  # paths answering `listen` with a bare `!done`
+        self.ethernet_monitor: dict[str, dict[str, str]] = {}  # port name -> `monitor once` row
         self.login_failure = "invalid user name or password (6)"
         self.muted = False  # swallow every command, like a half-dead link
         self.login_count = 0
         self.cancelled_tags: list[str] = []
+        self.stream_requests: list[tuple[str, dict[str, str]]] = []  # (command, attributes)
         self._writers: list[asyncio.StreamWriter] = []
         self._subscriptions: list[tuple[asyncio.StreamWriter, str, str]] = []
         self._server: asyncio.Server | None = None
@@ -62,6 +68,8 @@ class FakeRouter:
                     await writer.drain()
         except (asyncio.IncompleteReadError, ConnectionError):
             pass
+        finally:
+            writer.close()  # like a real server: hang up when the client has gone
 
     def _handle(self, writer, command: str, tag: str, attrs: dict[str, str]) -> None:
         if command == "/login":
@@ -80,6 +88,16 @@ class FakeRouter:
                 _reply(writer, tag, "!done")
             else:
                 self._subscriptions.append((writer, path, tag))
+        elif command in STREAMING_COMMANDS:
+            self.stream_requests.append((command, attrs))
+            self._subscriptions.append((writer, command, tag))
+        elif command == "/interface/ethernet/monitor":
+            row = self.ethernet_monitor.get(attrs.get("numbers", ""))
+            if row is None:
+                _reply(writer, tag, "!trap", {"message": "no such item"})
+            else:
+                _reply(writer, tag, "!re", row)
+            _reply(writer, tag, "!done")
         elif command == "/cancel":
             self._cancel(writer, tag, attrs["tag"])
         elif command.endswith("/print") and command.removesuffix("/print") in self.tables:

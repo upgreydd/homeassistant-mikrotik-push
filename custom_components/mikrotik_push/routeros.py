@@ -11,7 +11,7 @@ import contextlib
 import itertools
 import logging
 import ssl
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 from .wire import encode_sentence, parse_reply, read_sentence
 
@@ -131,13 +131,17 @@ class RouterOSConnection:
         finally:
             del self._queues[tag]
 
-    async def listen(self, path: str, **attrs: str) -> AsyncIterator[dict[str, str]]:
+    def listen(self, path: str, **attrs: str) -> AsyncIterator[dict[str, str]]:
         """Yield rows of `<path>/listen`; a removed item arrives as `.id` plus `.dead`.
 
         Only changes are streamed (no initial dump) and each event carries the full row,
         so take a `<path>/print` snapshot first. Verified on RouterOS 7.25.1.
         """
-        tag, q = await self._send(f"{path}/listen", attrs)
+        return self.stream(f"{path}/listen", **attrs)
+
+    async def stream(self, command: str, **attrs: str) -> AsyncIterator[dict[str, str]]:
+        """Yield the rows of a command that keeps running (`listen`, `monitor-traffic`, ...)."""
+        tag, q = await self._send(command, attrs)
         try:
             while True:
                 kind, data = await q.get()
@@ -167,3 +171,12 @@ class RouterOSConnection:
             async with asyncio.timeout(2):
                 await self._writer.wait_closed()
         self.closed.set()
+
+
+async def forward_events(
+    connection: RouterOSConnection, path: str, deliver: Callable[[dict[str, str]], None]
+) -> None:
+    """Hand every `listen` event of `path` to `deliver`; ending at all counts as a lost link."""
+    async for event in connection.listen(path):
+        deliver(event)
+    raise StreamEnded(f"{path} stream ended")

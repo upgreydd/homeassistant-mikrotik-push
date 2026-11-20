@@ -21,7 +21,7 @@ async def async_setup_entry(
     entry: MikrotikPushConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    watcher = entry.runtime_data
+    watcher = entry.runtime_data.watcher
     tracked: set[str] = set()
 
     @callback

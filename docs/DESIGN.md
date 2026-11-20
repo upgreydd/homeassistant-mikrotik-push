@@ -43,6 +43,26 @@ features (NAT, mangle, filter, queues, captive portal, GPS, UPS).
 - Idle phones that sleep their Wi-Fi may stop sending frames and age out of the bridge table; they then
   show "not home" after the departure time above until they talk again.
 
+## Pushed readings (measured on RouterOS 7.25.1, RB5009)
+Home Assistant opens the one connection and subscribes; the router then pushes down it.
+| Reading | Mechanism | Cost |
+|---|---|---|
+| Link state of ports | `/interface/listen` (counters do not trigger events) | events on change only |
+| Negotiated speed | `/interface/ethernet/monitor once`, asked after a link change | one call per change |
+| Traffic rx/tx per port | `/interface/monitor-traffic interval=5s`, one command for all ports | router maximum interval is 5 s |
+| CPU, free memory | `/system/resource/monitor interval=5s` | |
+| Temperatures, voltages | `/system/health/print` every 60 s (no stream exists) | one call per minute |
+| RouterOS version | `/system/package/update/print` every 6 h (needs no write permission) | |
+The router accepts intervals of 20 ms to 5 s only; Home Assistant coalesces the 5 s samples and announces
+them at most once per update interval, so entities are not written more often than that.
+Measured cost with every port streaming at 5 s: router CPU 5.8 % with and without, 1.7 KB/s.
+Ports are identified by their factory name (`default-name`), so renaming one in WinBox keeps its entities
+and history; the traffic stream restarts when the set of port names changes. Entities of a port that no
+longer exists stay unavailable until deleted by hand. A failing optional reading (no permission, a
+firmware without that command) is logged and dropped on its own; it never ends the session presence
+depends on. Readings are cleared when a new connection starts, because the router may have rebooted.
+Switches (NAT, filter, queues), kid control and scripts are not offered: they need write access.
+
 ## Entities
 One `device_tracker` per known host, `unique_id` = `<config entry id>_<MAC>`. Enabled by default when the lease has a comment or
 is static (the admin knows the device); other leases follow Home Assistant's rule (disabled unless another

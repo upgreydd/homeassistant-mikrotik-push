@@ -11,6 +11,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 
@@ -289,10 +290,163 @@ async def test_unloading_stops_the_watcher_and_closes_the_connection(
     hass: HomeAssistant, router, loaded_entry
 ):
     await until(lambda: hass.states.get(PHONE))
-    watcher = loaded_entry.runtime_data
+    watcher = loaded_entry.runtime_data.watcher
 
     assert await hass.config_entries.async_unload(loaded_entry.entry_id)
     await hass.async_block_till_done()
 
     assert not watcher.connected
     await until(lambda: all(writer.is_closing() for writer in router._writers))
+
+
+ALL_FEATURES = {"track_ports": True, "track_traffic": True, "track_system": True, "update_interval": 5}
+
+
+def state_of(hass, entry, domain, tail):
+    entity_id = er.async_get(hass).async_get_entity_id(domain, DOMAIN, f"{entry.entry_id}_{tail}")
+    return hass.states.get(entity_id) if entity_id else None
+
+
+@pytest.fixture
+async def full_entry(hass: HomeAssistant, router):
+    entry = MockConfigEntry(
+        domain=DOMAIN, data=entry_data(router), options=ALL_FEATURES, unique_id="SN123"
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    yield entry
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+async def test_the_router_is_a_device_with_model_and_version(hass: HomeAssistant, loaded_entry):
+    (device,) = dr.async_entries_for_config_entry(dr.async_get(hass), loaded_entry.entry_id)
+
+    assert (device.manufacturer, device.model, device.sw_version) == ("MikroTik", "RB-TEST", "7.25.1")
+    assert device.serial_number == "SN123"
+
+
+async def test_nothing_optional_exists_until_it_is_selected(hass: HomeAssistant, loaded_entry):
+    await until(lambda: hass.states.get(PHONE))
+    assert not hass.states.async_entity_ids("binary_sensor")
+    assert not hass.states.async_entity_ids("sensor")
+    assert not hass.states.async_entity_ids("update")
+
+
+async def test_ports_report_link_and_speed(hass: HomeAssistant, full_entry):
+    await until(lambda: state_of(hass, full_entry, "binary_sensor", "port_ether1_link"))
+
+    assert state_of(hass, full_entry, "binary_sensor", "port_ether1_link").state == "on"
+    assert state_of(hass, full_entry, "binary_sensor", "port_ether2_link").state == "off"
+    assert state_of(hass, full_entry, "sensor", "port_ether1_speed").state == "1000"
+    assert state_of(hass, full_entry, "sensor", "port_ether2_speed").state == "unknown"
+
+
+async def test_a_link_change_is_pushed_into_the_port_entities(
+    hass: HomeAssistant, router, full_entry
+):
+    await until(lambda: state_of(hass, full_entry, "binary_sensor", "port_ether2_link"))
+    router.ethernet_monitor["ether2"] = {"name": "ether2", "status": "link-ok", "rate": "2.5Gbps"}
+
+    await router.push(
+        "/interface",
+        {".id": "*2", "name": "ether2", "type": "ether", "running": "true"},
+    )
+
+    await until(lambda: state_of(hass, full_entry, "binary_sensor", "port_ether2_link").state == "on")
+    await until(lambda: state_of(hass, full_entry, "sensor", "port_ether2_speed").state == "2500")
+
+
+async def test_traffic_load_and_update_arrive_as_entities(hass: HomeAssistant, router, full_entry):
+    await until(lambda: state_of(hass, full_entry, "update", "system_update"))
+    await router.wait_for_subscribers(5)  # leases, bridge, interfaces, traffic, resource
+
+    await router.push(
+        "/interface/monitor-traffic",
+        {"name": "ether1", "rx-bits-per-second": "8000000", "tx-bits-per-second": "1000000"},
+    )
+    await router.push("/system/resource/monitor", {"cpu-used": "7", "free-memory": "512000"})
+
+    await until(lambda: state_of(hass, full_entry, "sensor", "port_ether1_rx"))
+    assert float(state_of(hass, full_entry, "sensor", "port_ether1_rx").state) == 8.0  # Mbit/s
+    assert float(state_of(hass, full_entry, "sensor", "port_ether1_tx").state) == 1.0
+    await until(lambda: state_of(hass, full_entry, "sensor", "system_cpu").state == "7")
+    assert float(state_of(hass, full_entry, "sensor", "system_memory").state) == 50.0
+    assert state_of(hass, full_entry, "sensor", "system_boot").state not in ("unknown", "unavailable")
+    assert float(state_of(hass, full_entry, "sensor", "system_health_cpu-temperature").state) == 51.0
+    update = state_of(hass, full_entry, "update", "system_update")
+    assert (update.state, update.attributes["installed_version"], update.attributes["latest_version"]) == (
+        "on", "7.25.1", "7.26",
+    )
+
+
+async def test_the_options_flow_turns_features_on_and_reloads(
+    hass: HomeAssistant, router, loaded_entry
+):
+    await until(lambda: hass.states.get(PHONE))
+
+    form = await hass.config_entries.options.async_init(loaded_entry.entry_id)
+    assert form["step_id"] == "init"
+    result = await hass.config_entries.options.async_configure(form["flow_id"], ALL_FEATURES)
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await until(lambda: state_of(hass, loaded_entry, "binary_sensor", "port_ether1_link"))
+
+
+async def test_unselecting_a_feature_removes_its_entities(hass: HomeAssistant, full_entry):
+    await until(lambda: state_of(hass, full_entry, "sensor", "port_ether1_speed"))
+
+    form = await hass.config_entries.options.async_init(full_entry.entry_id)
+    await hass.config_entries.options.async_configure(
+        form["flow_id"], {**ALL_FEATURES, "track_traffic": False, "track_system": False}
+    )
+    await hass.async_block_till_done()
+
+    await until(lambda: state_of(hass, full_entry, "binary_sensor", "port_ether1_link"))
+    assert state_of(hass, full_entry, "sensor", "port_ether1_rx") is None
+    assert state_of(hass, full_entry, "sensor", "system_cpu") is None
+    assert state_of(hass, full_entry, "update", "system_update") is None
+    assert state_of(hass, full_entry, "sensor", "port_ether1_speed") is not None
+
+
+async def test_a_router_without_health_readings_keeps_presence_working(
+    hass: HomeAssistant, router
+):
+    del router.tables["/system/health"]
+    entry = MockConfigEntry(
+        domain=DOMAIN, data=entry_data(router), options=ALL_FEATURES, unique_id="SN123"
+    )
+    entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    await until(lambda: hass.states.get(PHONE) and hass.states.get(PHONE).state == "home")
+    await router.wait_for_subscribers(5)
+    await router.push("/system/resource/monitor", {"cpu-used": "3", "free-memory": "1024"})
+    await until(lambda: state_of(hass, entry, "sensor", "system_cpu").state == "3")
+    assert hass.states.get(PHONE).state == "home"
+    assert router.login_count == 1  # the session was never torn down
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_the_update_entity_is_unknown_until_the_router_has_checked(
+    hass: HomeAssistant, router
+):
+    router.tables["/system/package/update"] = [
+        {"installed-version": "7.25.1", "latest-version": "", "status": "ERROR"}
+    ]
+    entry = MockConfigEntry(
+        domain=DOMAIN, data=entry_data(router), options=ALL_FEATURES, unique_id="SN123"
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    await until(lambda: state_of(hass, entry, "update", "system_update"))
+    await until(lambda: state_of(hass, entry, "update", "system_update").state != "unavailable")
+
+    assert state_of(hass, entry, "update", "system_update").state == "unknown"
+    await hass.config_entries.async_unload(entry.entry_id)

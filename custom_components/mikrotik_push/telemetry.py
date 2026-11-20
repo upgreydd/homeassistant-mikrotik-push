@@ -1,0 +1,358 @@
+"""Ports, traffic and system readings pushed by the router, kept apart from presence tracking.
+
+Everything arrives over the watcher's one connection: `listen` for port state, router-side
+`monitor-*` streams for traffic and load. The 5 s samples are averaged and only announced to
+listeners every `publish_interval` seconds, so Home Assistant is not asked to write a state per
+sample. A reading that fails (no permission, a firmware without that command) is dropped on its
+own: it must never end the session that presence tracking depends on.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
+
+from .router_info import parse_uptime
+from .routeros import ConnectionLost, RouterOSConnection, RouterOSError, forward_events
+
+_LOGGER = logging.getLogger(__name__)
+
+INTERFACE_PATH = "/interface"
+TRAFFIC_COMMAND = "/interface/monitor-traffic"
+RESOURCE_COMMAND = "/system/resource/monitor"
+STREAM_INTERVAL = "5s"  # the longest interval the router accepts
+HEALTH_POLL_SECONDS = 60  # /system/health has no stream, one cheap read per minute
+UPDATE_POLL_SECONDS = 6 * 3600  # the router itself only learns of new versions now and then
+BOOT_TIME_TOLERANCE = timedelta(seconds=60)  # re-reading the uptime must not make the boot time jitter
+PORT_TYPES = frozenset({"ether"})  # includes SFP cages
+_RATE_MBPS = {"Mbps": 1, "Gbps": 1000}
+_LOAD = "load"
+
+
+class Channel(StrEnum):
+    PORTS = "ports"
+    TRAFFIC = "traffic"
+    SYSTEM = "system"
+    UPDATE = "update"
+
+
+@dataclass(frozen=True, slots=True)
+class Features:
+    """Which optional readings the user asked for."""
+
+    ports: bool = False
+    traffic: bool = False
+    system: bool = False
+
+    @property
+    def needs_interfaces(self) -> bool:
+        return self.ports or self.traffic
+
+
+@dataclass(frozen=True, slots=True)
+class Port:
+    name: str  # what the router calls it now; users may rename it
+    running: bool
+    rate_mbps: int | None  # negotiated speed; None while the link is down
+
+
+@dataclass(frozen=True, slots=True)
+class Traffic:
+    rx_bps: int
+    tx_bps: int
+
+
+@dataclass(frozen=True, slots=True)
+class Load:
+    cpu_percent: int
+    free_memory: int  # bytes
+
+
+@dataclass(frozen=True, slots=True)
+class Health:
+    value: float
+    kind: str  # RouterOS unit: C (temperature), V (voltage)
+
+
+@dataclass(frozen=True, slots=True)
+class RouterOsUpdate:
+    installed: str
+    latest: str | None  # None until the router has checked for updates
+    status: str  # the router's own words, e.g. "System is already up to date"
+
+
+Listener = Callable[[Channel], None]
+
+
+def parse_rate_mbps(text: str | None) -> int | None:
+    """`2.5Gbps` -> 2500, `100Mbps` -> 100, anything else (no link) -> None."""
+    if not text:
+        return None
+    for suffix, factor in _RATE_MBPS.items():
+        if text.endswith(suffix):
+            return round(float(text.removesuffix(suffix)) * factor)
+    return None
+
+
+def port_key(row: dict[str, str]) -> str:
+    """Stable identity of a port: the factory name survives a rename by the user."""
+    return row.get("default-name") or row["name"]
+
+
+class _Averager:
+    """Collects samples per key and hands out their means once per publication."""
+
+    def __init__(self) -> None:
+        self._sums: dict[str, list[float]] = {}
+
+    def add(self, key: str, *values: float) -> None:
+        entry = self._sums.setdefault(key, [0, *([0.0] * len(values))])
+        entry[0] += 1
+        for index, value in enumerate(values, start=1):
+            entry[index] += value
+
+    def take(self) -> dict[str, tuple[float, ...]]:
+        means = {key: tuple(total / entry[0] for total in entry[1:]) for key, entry in self._sums.items()}
+        self._sums = {}
+        return means
+
+
+class RouterTelemetry:
+    """Holds the latest readings; `run()` keeps them current for one connection."""
+
+    def __init__(self, features: Features, publish_interval: float) -> None:
+        self.features = features
+        self.total_memory = 0
+        self.ports: dict[str, Port] = {}  # by port_key()
+        self.traffic: dict[str, Traffic] = {}  # by port_key()
+        self.load: Load | None = None
+        self.health: dict[str, Health] = {}
+        self.boot_time: datetime | None = None
+        self.update: RouterOsUpdate | None = None
+        self._publish_interval = publish_interval
+        self._interfaces: dict[str, dict[str, str]] = {}
+        self._listeners: list[Listener] = []
+        self._fast_values_changed = asyncio.Event()
+        self._traffic_means = _Averager()
+        self._load_means = _Averager()
+        self._streamed_names: frozenset[str] = frozenset()
+        self._ports_changed = asyncio.Event()
+
+    def add_listener(self, listener: Listener) -> Callable[[], None]:
+        self._listeners.append(listener)
+        return lambda: self._listeners.remove(listener)
+
+    async def run(self, connection: RouterOSConnection) -> None:
+        """Follow the router until the connection fails."""
+        self._forget_readings()
+        events: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+        try:
+            async with asyncio.TaskGroup() as tasks:
+                if self.features.needs_interfaces:
+                    # Listening starts before the snapshot is read, as for presence: nothing is lost.
+                    tasks.create_task(
+                        _optional("Interface events", forward_events(connection, INTERFACE_PATH, events.put_nowait))
+                    )
+                tasks.create_task(self._follow(connection, events, tasks))
+                tasks.create_task(self._publish_fast_values())
+        except ExceptionGroup as group:
+            raise group.exceptions[0] from None
+
+    def _forget_readings(self) -> None:
+        """A new connection may face a rebooted router: nothing seen before is current."""
+        self.ports = {}
+        self.traffic = {}
+        self.load = None
+        self.health = {}
+        self._traffic_means = _Averager()
+        self._load_means = _Averager()
+        self._streamed_names = frozenset()
+
+    async def _follow(
+        self,
+        connection: RouterOSConnection,
+        events: asyncio.Queue[dict[str, str]],
+        tasks: asyncio.TaskGroup,
+    ) -> None:
+        features = self.features
+        if features.system:
+            tasks.create_task(_optional("Uptime", self._load_uptime(connection)))
+        if features.needs_interfaces:
+            await _optional("Interfaces", self._load_interfaces(connection))
+        if features.traffic:
+            tasks.create_task(_optional("Traffic", self._follow_traffic(connection)))
+        if features.system:
+            tasks.create_task(_optional("CPU and memory", self._follow_load(connection)))
+            tasks.create_task(_optional("Temperatures and voltages", self._poll_health(connection)))
+            tasks.create_task(_optional("RouterOS version", self._poll_update(connection)))
+        if features.needs_interfaces:
+            await _optional("Interface events", self._apply_interface_events(connection, events))
+
+    # --- interfaces: link state (push) and negotiated speed (asked once per link change)
+
+    async def _load_interfaces(self, connection: RouterOSConnection) -> None:
+        self._interfaces = {row[".id"]: row for row in await connection.call("/interface/print")}
+        await self._refresh_ports(connection)
+
+    async def _apply_interface_events(
+        self, connection: RouterOSConnection, events: asyncio.Queue[dict[str, str]]
+    ) -> None:
+        while True:
+            event = await events.get()
+            if event.get(".dead") in ("true", "yes"):
+                self._interfaces.pop(event[".id"], None)
+            else:
+                self._interfaces[event[".id"]] = {**self._interfaces.get(event[".id"], {}), **event}
+            await self._refresh_ports(connection)
+
+    async def _refresh_ports(self, connection: RouterOSConnection) -> None:
+        ports: dict[str, Port] = {}
+        for row in self._interfaces.values():
+            if row.get("type") not in PORT_TYPES:
+                continue
+            key, name, running = port_key(row), row["name"], row.get("running") == "true"
+            known = self.ports.get(key)
+            if known is not None and known.running == running:
+                rate = known.rate_mbps  # same link state: the speed has not changed either
+            else:
+                rate = await _ask_rate(connection, name) if running else None
+            ports[key] = Port(name, running, rate)
+        changed = ports != self.ports
+        self.ports = ports
+        if self._traffic_names() != self._streamed_names:
+            self._ports_changed.set()
+        if changed and self.features.ports:
+            self._notify(Channel.PORTS)
+
+    # --- traffic and load: router-side streams
+
+    def _traffic_names(self) -> frozenset[str]:
+        # A comma would split one interface name into several in the command.
+        return frozenset(port.name for port in self.ports.values() if "," not in port.name)
+
+    async def _follow_traffic(self, connection: RouterOSConnection) -> None:
+        """Stream the ports known now; start over whenever the set of port names changes."""
+        while True:
+            names = self._traffic_names()
+            self._streamed_names = names
+            self._ports_changed.clear()
+            if names:
+                await self._stream_until_ports_change(connection, names)
+            else:
+                await self._ports_changed.wait()
+
+    async def _stream_until_ports_change(
+        self, connection: RouterOSConnection, names: frozenset[str]
+    ) -> None:
+        stream = asyncio.create_task(self._consume_traffic(connection, names))
+        changed = asyncio.create_task(self._ports_changed.wait())
+        try:
+            done, _ = await asyncio.wait({stream, changed}, return_when=asyncio.FIRST_COMPLETED)
+            if stream in done:
+                stream.result()  # the stream only ends by failing
+        finally:
+            for task in (stream, changed):
+                task.cancel()
+            await asyncio.gather(stream, changed, return_exceptions=True)
+
+    async def _consume_traffic(self, connection: RouterOSConnection, names: frozenset[str]) -> None:
+        keys_by_name = {port.name: key for key, port in self.ports.items()}
+        async for row in connection.stream(
+            TRAFFIC_COMMAND, interface=",".join(sorted(names)), interval=STREAM_INTERVAL
+        ):
+            key = keys_by_name.get(row["name"])
+            if key is not None:
+                self._traffic_means.add(
+                    key, int(row.get("rx-bits-per-second", 0)), int(row.get("tx-bits-per-second", 0))
+                )
+                self._fast_values_changed.set()
+        raise ConnectionLost("traffic stream ended")
+
+    async def _follow_load(self, connection: RouterOSConnection) -> None:
+        async for row in connection.stream(RESOURCE_COMMAND, interval=STREAM_INTERVAL):
+            self._load_means.add(_LOAD, int(row["cpu-used"]), int(row["free-memory"]))
+            self._fast_values_changed.set()
+        raise ConnectionLost("resource stream ended")
+
+    async def _load_uptime(self, connection: RouterOSConnection) -> None:
+        resource = (await connection.call("/system/resource/print"))[0]
+        self.total_memory = int(resource.get("total-memory", self.total_memory))
+        boot_time = datetime.now(UTC) - timedelta(seconds=parse_uptime(resource.get("uptime", "")))
+        if self.boot_time is None or abs(boot_time - self.boot_time) > BOOT_TIME_TOLERANCE:
+            self.boot_time = boot_time
+        self._notify(Channel.SYSTEM)
+
+    async def _poll_health(self, connection: RouterOSConnection) -> None:
+        while True:
+            rows = await connection.call("/system/health/print")
+            health = {
+                row["name"]: Health(float(row["value"]), row.get("type", ""))
+                for row in rows
+                if row.get("type") in ("C", "V") and row.get("value")
+            }
+            if health != self.health:
+                self.health = health
+                self._notify(Channel.SYSTEM)
+            await asyncio.sleep(HEALTH_POLL_SECONDS)
+
+    async def _poll_update(self, connection: RouterOSConnection) -> None:
+        while True:
+            rows = await connection.call("/system/package/update/print")
+            if rows and rows[0].get("installed-version"):
+                row = rows[0]
+                update = RouterOsUpdate(
+                    installed=row["installed-version"],
+                    latest=row.get("latest-version") or None,
+                    status=row.get("status", ""),
+                )
+                if update != self.update:
+                    self.update = update
+                    self._notify(Channel.UPDATE)
+            await asyncio.sleep(UPDATE_POLL_SECONDS)
+
+    async def _publish_fast_values(self) -> None:
+        """First sample goes out at once; after that at most one announcement per interval."""
+        while True:
+            await self._fast_values_changed.wait()
+            self._fast_values_changed.clear()
+            for key, (rx, tx) in self._traffic_means.take().items():
+                self.traffic[key] = Traffic(round(rx), round(tx))
+            if load := self._load_means.take().get(_LOAD):
+                self.load = Load(cpu_percent=round(load[0]), free_memory=round(load[1]) * 1024)  # KiB
+            if self.features.traffic:
+                self._notify(Channel.TRAFFIC)
+            if self.features.system:
+                self._notify(Channel.SYSTEM)
+            await asyncio.sleep(self._publish_interval)
+
+    def _notify(self, channel: Channel) -> None:
+        for listener in list(self._listeners):
+            try:
+                listener(channel)
+            except Exception:
+                _LOGGER.exception("A telemetry listener failed")
+
+
+async def _optional(what: str, reading: Awaitable[None]) -> None:
+    """Run one optional reading; its own failure ends only that reading, a lost link ends all."""
+    try:
+        await reading
+    except ConnectionLost:
+        raise
+    except (RouterOSError, KeyError, ValueError) as error:
+        _LOGGER.warning("%s unavailable: %s", what, error)
+
+
+async def _ask_rate(connection: RouterOSConnection, port: str) -> int | None:
+    try:
+        rows = await connection.call("/interface/ethernet/monitor", numbers=port, once="")
+    except ConnectionLost:
+        raise
+    except RouterOSError as error:  # e.g. a port type that has no ethernet monitor
+        _LOGGER.debug("No speed for %s: %s", port, error)
+        return None
+    return parse_rate_mbps(rows[0].get("rate")) if rows else None

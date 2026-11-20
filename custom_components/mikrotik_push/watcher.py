@@ -9,7 +9,8 @@ from dataclasses import dataclass
 
 from .const import IDENTITY_PATH
 from .registry import HostRegistry, Row, Table
-from .routeros import LoginRejected, RouterOSConnection, RouterOSError, StreamEnded
+from .routeros import LoginRejected, RouterOSConnection, RouterOSError, forward_events
+from .telemetry import RouterTelemetry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,8 +54,10 @@ class RouterWatcher:
         connect: ConnectionFactory,
         on_login_rejected: Callable[[], None],
         timing: Timing = Timing(),
+        telemetry: RouterTelemetry | None = None,
     ) -> None:
         self.registry = HostRegistry(timing.departure_grace)
+        self.telemetry = telemetry
         self.connected = False
         self._connect = connect
         self._on_login_rejected = on_login_rejected
@@ -107,9 +110,15 @@ class RouterWatcher:
                 # The listen commands are written to the socket before the snapshot is requested
                 # (tasks start in order), so no change can slip between snapshot and stream.
                 for table, path in TABLE_PATHS.items():
-                    tasks.create_task(_forward_events(connection, table, path, events))
+                    tasks.create_task(
+                        forward_events(
+                            connection, path, lambda event, table=table: events.put_nowait((table, event))
+                        )
+                    )
                 tasks.create_task(self._apply_snapshot_then_events(connection, events))
                 tasks.create_task(self._keepalive(connection))
+                if self.telemetry:
+                    tasks.create_task(self.telemetry.run(connection))
                 tasks.create_task(self._resync_periodically(connection))
         except ExceptionGroup as group:
             raise group.exceptions[0] from None
@@ -194,17 +203,6 @@ class RouterWatcher:
                 listener(change)
             except Exception:
                 _LOGGER.exception("A watcher listener failed")
-
-
-async def _forward_events(
-    connection: RouterOSConnection,
-    table: Table,
-    path: str,
-    events: asyncio.Queue[tuple[Table, Row]],
-) -> None:
-    async for event in connection.listen(path):
-        events.put_nowait((table, event))
-    raise StreamEnded(f"{path} stream ended")
 
 
 def _log_failure(message: str, error: Exception) -> None:
