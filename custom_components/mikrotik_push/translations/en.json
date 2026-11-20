@@ -1,0 +1,25 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to a MikroTik router",
+        "description": "Create the read-only API user first (see docs/ROUTER_SETUP.md).",
+        "data": {
+          "host": "Host",
+          "port": "API port (8729 = api-ssl, 8728 = plain api)",
+          "username": "Username",
+          "password": "Password",
+          "ssl": "Use TLS (api-ssl)",
+          "verify_ssl": "Verify the router certificate"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect. Check the host, port, TLS setting and that the API service is enabled for this IP.",
+      "invalid_auth": "The router rejected the user name or password."
+    },
+    "abort": {
+      "already_configured": "This router is already configured."
+    }
+  }
+}
