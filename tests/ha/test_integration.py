@@ -23,9 +23,13 @@ def entry_data(router, password="secret"):
             CONF_PASSWORD: password, CONF_SSL: False, CONF_VERIFY_SSL: False}
 
 
-def password_default(form):
-    key = next(k for k in form["data_schema"].schema if k == CONF_PASSWORD)
+def field_default(form, name):
+    key = next(k for k in form["data_schema"].schema if k == name)
     return key.default()
+
+
+def password_default(form):
+    return field_default(form, CONF_PASSWORD)
 
 
 async def start_flow(hass):
@@ -43,7 +47,7 @@ async def test_flow_shows_a_setup_script_with_the_prefilled_one_time_password(
 
     assert result["step_id"] == "credentials"
     password = password_default(result)
-    script = result["description_placeholders"]["script"]
+    script = field_default(result, "setup_script")
     assert f'password="{password}"' in script
     assert 'name="mikrotik-push"' in script
 
@@ -60,6 +64,7 @@ async def test_flow_creates_the_entry_when_the_login_works(hass: HomeAssistant, 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "fake"
     assert result["result"].unique_id == "SN123"
+    assert "setup_script" not in result["data"]
     await hass.config_entries.async_unload(result["result"].entry_id)
 
 
@@ -262,7 +267,7 @@ async def test_reauth_shows_a_fresh_script_for_the_new_password(hass: HomeAssist
     form = await hass.config_entries.flow.async_configure(flow["flow_id"])
 
     assert form["step_id"] == "reauth_confirm"
-    assert f'password="{password_default(form)}"' in form["description_placeholders"]["script"]
+    assert f'password="{password_default(form)}"' in field_default(form, "setup_script")
 
 
 async def test_reauth_refuses_a_different_router(hass: HomeAssistant, router):

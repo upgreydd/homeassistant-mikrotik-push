@@ -9,20 +9,22 @@
       },
       "credentials": {
         "title": "Prepare the router and sign in",
-        "description": "Paste this into a RouterOS terminal on the router (WinBox: New Terminal). It creates a read-only user for Home Assistant, limited to the address {ha_address}, with the one-time password below, and enables api-ssl. Then press Submit.\n\n```\n{script}\n```",
+        "description": "Copy the script below (click in it, Ctrl+A, Ctrl+C), paste it into a RouterOS terminal on the router (WinBox: New Terminal) and run it. It creates a read-only user for Home Assistant, limited to the address {ha_address}, with the one-time password from the Password field, and enables api-ssl. Then press Submit.",
         "data": {
           "username": "Username",
           "password": "Password",
           "port": "API port (8729 = api-ssl, 8728 = plain api)",
           "ssl": "Use TLS (api-ssl)",
-          "verify_ssl": "Verify the router certificate (needs a CA-signed certificate)"
+          "verify_ssl": "Verify the router certificate (needs a CA-signed certificate)",
+          "setup_script": "Router setup script"
         }
       },
       "reauth_confirm": {
         "title": "Sign in again",
-        "description": "The router rejected the saved password. Home Assistant is now seen as {ha_address}; if that changed, the old user is bound to the old address. Paste this script into a RouterOS terminal to reset the user, then press Submit.\n\n```\n{script}\n```",
+        "description": "The router rejected the saved password. Home Assistant is now seen as {ha_address}; if that changed, the old user is bound to the old address. Copy the script below, paste it into a RouterOS terminal to reset the user, then press Submit.",
         "data": {
-          "password": "Password"
+          "password": "Password",
+          "setup_script": "Router setup script"
         }
       }
     },

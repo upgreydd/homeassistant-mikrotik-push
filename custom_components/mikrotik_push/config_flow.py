@@ -39,6 +39,10 @@ _LOGGER = logging.getLogger(__name__)
 type Probe = tuple[str, str]  # (router identity, stable router id)
 
 _PASSWORD_FIELD = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+# The script lives in a form field, not in the description: the frontend redraws the description,
+# which drops the text selection, while a text area keeps it so the script can be copied.
+_SCRIPT_KEY = "setup_script"
+_SCRIPT_FIELD = TextSelector(TextSelectorConfig(multiline=True))
 
 
 class MikrotikPushConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -68,6 +72,7 @@ class MikrotikPushConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             data = {CONF_HOST: self._host, **user_input}
+            data.pop(_SCRIPT_KEY, None)
             probe, error = await _probe_router(data)
             if probe is not None:
                 identity, router_id = probe
@@ -76,12 +81,14 @@ class MikrotikPushConfigFlow(ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(title=identity, data=data)
             errors["base"] = error
 
+        script, ha_address = await self._setup_instructions(DEFAULT_USERNAME)
         return self.async_show_form(
             step_id="credentials",
             errors=errors,
-            description_placeholders=await self._setup_instructions(DEFAULT_USERNAME),
+            description_placeholders={"ha_address": ha_address},
             data_schema=vol.Schema(
                 {
+                    vol.Optional(_SCRIPT_KEY, default=script): _SCRIPT_FIELD,
                     vol.Required(CONF_USERNAME, default=DEFAULT_USERNAME): str,
                     vol.Required(CONF_PASSWORD, default=self._password): _PASSWORD_FIELD,
                     vol.Required(CONF_PORT, default=DEFAULT_PORT): cv.port,
@@ -108,28 +115,34 @@ class MikrotikPushConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._abort_if_unique_id_mismatch()
                 return self.async_update_reload_and_abort(entry, data=data)
             errors["base"] = error
+        script, ha_address = await self._setup_instructions(entry.data[CONF_USERNAME])
         return self.async_show_form(
             step_id="reauth_confirm",
             errors=errors,
-            description_placeholders=await self._setup_instructions(entry.data[CONF_USERNAME]),
+            description_placeholders={"ha_address": ha_address},
             data_schema=vol.Schema(
-                {vol.Required(CONF_PASSWORD, default=self._password): _PASSWORD_FIELD}
+                {
+                    vol.Optional(_SCRIPT_KEY, default=script): _SCRIPT_FIELD,
+                    vol.Required(CONF_PASSWORD, default=self._password): _PASSWORD_FIELD,
+                }
             ),
         )
 
-    async def _setup_instructions(self, username: str) -> dict[str, str]:
-        """Placeholders for the form text: the script to paste and the address it binds to."""
+    async def _setup_instructions(self, username: str) -> tuple[str, str]:
+        """The script to paste on the router and the Home Assistant address it binds to."""
         try:
             ha_address = await async_get_source_ip(self.hass, target_ip=self._host)
         except HomeAssistantError:
             ha_address = None
         if not is_plain(username):
-            return {"script": "(no script for this user name: set the password on the router)",
-                    "ha_address": ha_address or "unknown"}
+            return (
+                "(no script for this user name: set the password on the router)",
+                ha_address or "unknown",
+            )
         script = build_setup_script(
             host=self._host, ha_address=ha_address, password=self._password, username=username
         )
-        return {"script": script, "ha_address": ha_address or "unknown"}
+        return script, ha_address or "unknown"
 
 
 async def _probe_router(data: Mapping[str, Any]) -> tuple[Probe | None, str]:
