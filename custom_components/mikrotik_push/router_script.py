@@ -73,9 +73,10 @@ def build_setup_script(
             f'/certificate remove [find name="{CERTIFICATE_NAME}"]; '
             f'/certificate remove [find name="{CA_NAME}"]; '
             f'/certificate add name="{CA_NAME}" common-name="{CA_NAME}" days-valid=3650 '
-            f'key-usage=key-cert-sign,crl-sign; /certificate sign "{CA_NAME}"; :delay 5s; '
+            f'key-usage=key-cert-sign,crl-sign; /certificate sign "{CA_NAME}"; :delay 5s; {_wait_for_key(CA_NAME)}; '
             f'/certificate add name="{CERTIFICATE_NAME}" common-name="{host}" days-valid=3650 '
             f'key-usage=tls-server; /certificate sign "{CERTIFICATE_NAME}" ca="{CA_NAME}"; :delay 5s; '
+            f'{_wait_for_key(CERTIFICATE_NAME)}; '
             f'/ip service set api-ssl certificate="{CERTIFICATE_NAME}" }}',
             "/ip service set api-ssl disabled=no",
             "# The router only learns of new RouterOS versions when told to look; do it daily.",
@@ -84,6 +85,14 @@ def build_setup_script(
             f'comment="{COMMENT}" on-event="{UPDATE_CHECK_COMMAND}" }}',
             f":do {{ {UPDATE_CHECK_COMMAND} }} on-error={{}}",
         ]
+    )
+
+
+def _wait_for_key(name: str) -> str:
+    """Signing takes longer on a slow CPU than any fixed delay: wait up to a minute for the key."""
+    return (
+        f':for tries from=1 to=60 do={{ '
+        f':if ([:len [/certificate find name="{name}" private-key=yes]] = 0) do={{ :delay 1s }} }}'
     )
 
 

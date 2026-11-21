@@ -258,6 +258,19 @@ async def test_an_interface_change_that_no_event_announced_is_found_by_the_resyn
     await stop(connection, task)
 
 
+async def test_a_speed_that_could_not_be_read_is_asked_again_at_the_next_resync(router, monkeypatch):
+    monkeypatch.setattr("mikrotik_push.telemetry.INTERFACE_RESYNC_SECONDS", 0.05)
+    router.failing_commands.add("/interface/ethernet/monitor")
+    telemetry, connection, task = await start(router, Features(ports=True))
+    await until(lambda: telemetry.ports and telemetry.ports["ether1"].running)
+    assert telemetry.ports["ether1"].rate_mbps is None
+
+    router.failing_commands.clear()
+
+    await until(lambda: telemetry.ports["ether1"].rate_mbps == 2500)
+    await stop(connection, task)
+
+
 async def test_a_failed_resync_does_not_end_the_port_updates(router, monkeypatch):
     monkeypatch.setattr("mikrotik_push.telemetry.INTERFACE_RESYNC_SECONDS", 0.05)
     telemetry, connection, task = await start(router, Features(ports=True))

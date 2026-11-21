@@ -55,6 +55,16 @@ def test_server_certificate_is_signed_by_a_local_ca_that_is_signed_first():
     assert 'find name="mikrotik-push-api" private-key=yes' in line  # a failed attempt is redone
 
 
+def test_each_signature_is_awaited_for_up_to_a_minute_before_the_next_step():
+    line = next(l for l in build().splitlines() if "/certificate sign" in l)
+    ca_wait = line.index(':for tries from=1 to=60 do={ :if ([:len [/certificate find name="mikrotik-push-ca"')
+    leaf_wait = line.index(':for tries from=1 to=60 do={ :if ([:len [/certificate find name="mikrotik-push-api"')
+    assert line.index('/certificate sign "mikrotik-push-ca"') < ca_wait
+    assert ca_wait < line.index('/certificate add name="mikrotik-push-api"')
+    assert line.index('/certificate sign "mikrotik-push-api"') < leaf_wait
+    assert leaf_wait < line.index("/ip service set api-ssl certificate=")
+
+
 def test_a_daily_update_check_is_scheduled_once_and_run_now():
     lines = build().splitlines()
     scheduler = next(line for line in lines if "/system scheduler add" in line)

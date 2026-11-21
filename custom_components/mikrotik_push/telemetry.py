@@ -236,7 +236,7 @@ class RouterTelemetry:
                 continue
             key, name, running = port_key(row), row["name"], row.get("running") == "true"
             known = self.ports.get(key)
-            if known is not None and known.running == running:
+            if known is not None and known.running == running and (known.rate_mbps or not running):
                 rate = known.rate_mbps  # same link state: the speed has not changed either
             else:
                 rate = await _ask_rate(connection, name) if running else None
