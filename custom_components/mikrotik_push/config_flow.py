@@ -43,6 +43,7 @@ from .const import (
     CONF_TRACK_PORTS,
     CONF_TRACK_SYSTEM,
     CONF_TRACK_TRAFFIC,
+    CONF_TRACK_UPLINK,
     CONF_UPDATE_INTERVAL,
     DEFAULT_PORT,
     DEFAULT_UPDATE_INTERVAL,
@@ -285,6 +286,7 @@ class MikrotikPushOptionsFlow(OptionsFlowWithReload):
                         CONF_TRACK_TRAFFIC, default=options.get(CONF_TRACK_TRAFFIC, False)
                     ): bool,
                     vol.Required(CONF_TRACK_SYSTEM, default=options.get(CONF_TRACK_SYSTEM, False)): bool,
+                    vol.Required(CONF_TRACK_UPLINK, default=options.get(CONF_TRACK_UPLINK, False)): bool,
                     vol.Required(
                         CONF_UPDATE_INTERVAL,
                         default=options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL),

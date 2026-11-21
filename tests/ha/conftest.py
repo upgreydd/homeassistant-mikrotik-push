@@ -41,6 +41,16 @@ def populate(fake: FakeRouter) -> None:
                 {"installed-version": "7.25.1", "latest-version": "7.26", "status": "New"}
             ],
             "/system/health": [{".id": "*1", "name": "cpu-temperature", "value": "51", "type": "C"}],
+            "/ip/route": [
+                {".id": "*1", "dst-address": "0.0.0.0/0", "routing-table": "main", "gateway": "10.0.0.1",
+                 "immediate-gw": "10.0.0.1%ether1", "distance": "1", "active": "true", "comment": "FIB DHCP"},
+                {".id": "*2", "dst-address": "0.0.0.0/0", "routing-table": "main", "gateway": "10.1.0.1",
+                 "immediate-gw": "10.1.0.1%ether2", "distance": "10"},
+                {".id": "*3", "dst-address": "0.0.0.0/0", "routing-table": "VPN", "gateway": "wg0",
+                 "immediate-gw": "wg0", "distance": "1", "active": "true"},
+                {".id": "*4", "dst-address": "10.9.0.0/24", "routing-table": "main", "gateway": "bridge",
+                 "immediate-gw": "bridge", "distance": "0", "active": "true"},
+            ],
             "/interface": [
                 {".id": "*1", "name": "ether1", "type": "ether", "running": "true"},
                 {".id": "*2", "name": "ether2", "type": "ether", "running": "false"},

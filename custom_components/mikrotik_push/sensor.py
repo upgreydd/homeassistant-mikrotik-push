@@ -1,4 +1,4 @@
-"""Port speed and traffic, router load, memory, boot time, temperatures and voltages.
+"""Port speed and traffic, router load, memory, boot time, temperatures, voltages and the uplink.
 
 None of these sensors has a `state_class`: Home Assistant would then keep long-term statistics of
 values that change every few seconds. History graphs work without one; statistics can be switched on
@@ -21,7 +21,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import MikrotikPushConfigEntry
 from .entity import MikrotikEntity, PortEntity, add_as_they_appear
-from .entity_ids import system_unique_id
+from .entity_ids import system_unique_id, uplink_unique_id
 from .telemetry import Channel
 
 _HEALTH_CLASSES = {
@@ -48,6 +48,8 @@ async def async_setup_entry(
             lambda: telemetry.traffic,
             lambda name: [PortTraffic(entry, name, "rx"), PortTraffic(entry, name, "tx")],
         )
+    if features.uplink:
+        async_add_entities([ActiveUplink(entry)])
     if features.system:
         async_add_entities([CpuLoad(entry), MemoryUsage(entry), LastBoot(entry)])
         add_as_they_appear(
@@ -153,3 +155,27 @@ class HealthReading(_SystemSensor):
     @property
     def native_value(self) -> float:
         return self._data.telemetry.health[self._reading].value
+
+
+class ActiveUplink(MikrotikEntity, SensorEntity):
+    """The interface the active default route leaves through: the WAN in use, whatever kind it is."""
+
+    _attr_name = "Active uplink"
+
+    def __init__(self, entry: MikrotikPushConfigEntry) -> None:
+        super().__init__(entry, Channel.UPLINK, uplink_unique_id(entry.entry_id))
+
+    def _has_reading(self) -> bool:
+        return self._data.telemetry.routes_known
+
+    @property
+    def native_value(self) -> str | None:
+        uplink = self._data.telemetry.uplink
+        return uplink.interface if uplink else None  # unknown: no active default route
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """`routes` lists every default route in order, so a template can pick any of them."""
+        telemetry = self._data.telemetry
+        active = telemetry.uplink.as_attributes() if telemetry.uplink else {}
+        return {**active, "routes": [route.as_attributes() for route in telemetry.routes]}

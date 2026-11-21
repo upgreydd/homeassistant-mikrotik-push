@@ -60,7 +60,8 @@
           "track_ports": "Ports: link state and negotiated speed",
           "track_traffic": "Traffic: receive and transmit rate per port",
           "track_system": "System: CPU, memory, last boot, temperatures, RouterOS update",
-          "update_interval": "Seconds between state updates of traffic and system values"
+          "track_uplink": "Uplink: the interface of the active default route, i.e. which WAN the router uses",
+          "update_interval": "Seconds between state updates of traffic and system values, and between reads of the uplink"
         }
       }
     }

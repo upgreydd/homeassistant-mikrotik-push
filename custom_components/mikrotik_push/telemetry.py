@@ -10,8 +10,9 @@ own: it must never end the session that presence tracking depends on.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -22,6 +23,8 @@ from .routeros import ConnectionLost, RouterOSConnection, RouterOSError, forward
 _LOGGER = logging.getLogger(__name__)
 
 INTERFACE_PATH = "/interface"
+ROUTE_PATH = "/ip/route"
+DEFAULT_ROUTE = "0.0.0.0/0"
 TRAFFIC_COMMAND = "/interface/monitor-traffic"
 RESOURCE_COMMAND = "/system/resource/monitor"
 STREAM_INTERVAL = "5s"  # the longest interval the router accepts
@@ -40,6 +43,7 @@ class Channel(StrEnum):
     TRAFFIC = "traffic"
     SYSTEM = "system"
     UPDATE = "update"
+    UPLINK = "uplink"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +53,7 @@ class Features:
     ports: bool = False
     traffic: bool = False
     system: bool = False
+    uplink: bool = False
 
     @property
     def needs_interfaces(self) -> bool:
@@ -81,6 +86,24 @@ class Health:
 
 
 @dataclass(frozen=True, slots=True)
+class DefaultRoute:
+    """One IPv4 default route; the active one of the main table is where internet traffic goes."""
+
+    interface: str | None  # None while the router cannot say (e.g. the link of a static gateway is down)
+    gateway: str
+    distance: int
+    table: str
+    active: bool
+    comment: str | None
+
+    def as_attributes(self) -> dict[str, str | int | bool]:
+        return {
+            "interface": self.interface, "gateway": self.gateway, "distance": self.distance,
+            "table": self.table, "active": self.active, "comment": self.comment,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class RouterOsUpdate:
     installed: str
     latest: str | None  # None until the router has checked for updates
@@ -98,6 +121,42 @@ def parse_rate_mbps(text: str | None) -> int | None:
         if text.endswith(suffix):
             return round(float(text.removesuffix(suffix)) * factor)
     return None
+
+
+def default_routes(rows: Iterable[dict[str, str]]) -> tuple[DefaultRoute, ...]:
+    """Every enabled IPv4 default route: the main table first, then each table by distance."""
+    routes = []
+    for row in rows:
+        if row.get("dst-address") != DEFAULT_ROUTE or row.get("disabled") in ("true", "yes"):
+            continue  # a disabled route cannot carry traffic; a failover may switch one off
+        try:
+            distance = int(row.get("distance", "0"))
+        except ValueError:
+            continue
+        gateway = row.get("gateway", "")
+        routes.append(
+            DefaultRoute(
+                interface=_outgoing_interface(row.get("immediate-gw", ""), gateway),
+                gateway=gateway,
+                distance=distance,
+                table=row.get("routing-table", "main"),
+                active=row.get("active") == "true",
+                comment=row.get("comment") or None,
+            )
+        )
+    return tuple(sorted(routes, key=lambda r: (r.table != "main", r.table, r.distance, not r.active)))
+
+
+def _outgoing_interface(immediate_gateway: str, gateway: str) -> str | None:
+    """`10.0.0.1%ether1` -> `ether1`; a gateway that is an interface (`wg0`, `pppoe-out1`) is its own."""
+    resolved = immediate_gateway or gateway  # no immediate gateway: the link of the route is down
+    if "%" in resolved:  # several comma-separated gateways: a route that shares its load
+        return ",".join(hop.rpartition("%")[2] for hop in resolved.split(","))
+    try:
+        ipaddress.ip_address(resolved)
+    except ValueError:
+        return resolved or None
+    return immediate_gateway or None  # a bare address says nothing about the interface
 
 
 def port_key(row: dict[str, str]) -> str:
@@ -135,6 +194,8 @@ class RouterTelemetry:
         self.health: dict[str, Health] = {}
         self.boot_time: datetime | None = None
         self.update: RouterOsUpdate | None = None
+        self.routes: tuple[DefaultRoute, ...] = ()
+        self.routes_known = False  # False until the routes have been read on this connection
         self._publish_interval = publish_interval
         self._interfaces: dict[str, dict[str, str]] = {}
         self._listeners: list[Listener] = []
@@ -143,6 +204,11 @@ class RouterTelemetry:
         self._load_means = _Averager()
         self._streamed_names: frozenset[str] = frozenset()
         self._ports_changed = asyncio.Event()
+
+    @property
+    def uplink(self) -> DefaultRoute | None:
+        """The default route in use: the first active one of the main table; None if there is none."""
+        return next((route for route in self.routes if route.active and route.table == "main"), None)
 
     def add_listener(self, listener: Listener) -> Callable[[], None]:
         self._listeners.append(listener)
@@ -171,6 +237,8 @@ class RouterTelemetry:
         self.traffic = {}
         self.load = None
         self.health = {}
+        self.routes = ()
+        self.routes_known = False
         self._traffic_means = _Averager()
         self._load_means = _Averager()
         self._streamed_names = frozenset()
@@ -195,6 +263,10 @@ class RouterTelemetry:
             )
             tasks.create_task(
                 _poll("RouterOS version", lambda: self._read_update(connection), UPDATE_POLL_SECONDS)
+            )
+        if features.uplink:
+            tasks.create_task(
+                _poll("Active default route", lambda: self._read_uplink(connection), self._publish_interval)
             )
         if features.needs_interfaces:
             await _optional("Interface events", self._apply_interface_events(connection, events))
@@ -317,6 +389,21 @@ class RouterTelemetry:
         if health != self.health:
             self.health = health
             self._notify(Channel.SYSTEM)
+
+    async def _read_uplink(self, connection: RouterOSConnection) -> None:
+        """The routing table has no `listen` worth following (a big table would flood us): poll the
+        default routes only, selected by the router, so the cost does not grow with the table."""
+        try:
+            rows = await connection.call(f"{ROUTE_PATH}/print", queries={"dst-address": DEFAULT_ROUTE})
+        except _READING_FAILURES:
+            if self.routes_known:  # old routes must not pass for current ones while the reads fail
+                self.routes_known = False
+                self._notify(Channel.UPLINK)
+            raise
+        routes = default_routes(rows)
+        if routes != self.routes or not self.routes_known:
+            self.routes, self.routes_known = routes, True
+            self._notify(Channel.UPLINK)
 
     async def _read_update(self, connection: RouterOSConnection) -> None:
         rows = await connection.call("/system/package/update/print")

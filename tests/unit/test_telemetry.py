@@ -5,7 +5,15 @@ import pytest
 from fake_router import FakeRouter, until
 from mikrotik_push.router_info import parse_uptime, read_router_info
 from mikrotik_push.routeros import RouterOSConnection
-from mikrotik_push.telemetry import Channel, Features, RouterOsUpdate, RouterTelemetry, parse_rate_mbps
+from mikrotik_push.telemetry import (
+    Channel,
+    DefaultRoute,
+    Features,
+    RouterOsUpdate,
+    RouterTelemetry,
+    default_routes,
+    parse_rate_mbps,
+)
 
 INTERFACES = [
     {".id": "*1", "name": "ether1", "type": "ether", "running": "true", "disabled": "false"},
@@ -32,6 +40,16 @@ async def router():
             "/system/health": [
                 {".id": "*1", "name": "cpu-temperature", "value": "51", "type": "C"},
                 {".id": "*2", "name": "fan-state", "value": "ok", "type": ""},
+            ],
+            "/ip/route": [
+                {".id": "*1", "dst-address": "0.0.0.0/0", "routing-table": "main", "gateway": "10.0.0.1",
+                 "immediate-gw": "10.0.0.1%ether1", "distance": "1", "active": "true", "comment": "FIB DHCP"},
+                {".id": "*2", "dst-address": "0.0.0.0/0", "routing-table": "main", "gateway": "10.1.0.1",
+                 "immediate-gw": "10.1.0.1%ether2", "distance": "10"},
+                {".id": "*3", "dst-address": "0.0.0.0/0", "routing-table": "VPN", "gateway": "wg0",
+                 "immediate-gw": "wg0", "distance": "1", "active": "true"},
+                {".id": "*4", "dst-address": "10.9.0.0/24", "routing-table": "main", "gateway": "bridge",
+                 "immediate-gw": "bridge", "distance": "0", "active": "true"},
             ],
         }
     )
@@ -315,4 +333,84 @@ async def test_a_reading_that_failed_is_tried_again_on_the_next_poll(router, mon
 
     await until(lambda: telemetry.health)
     assert telemetry.health["cpu-temperature"].value == 52.0 and not task.done()
+    await stop(connection, task)
+
+
+def route(interface, distance=1, **overrides):
+    return {".id": interface, "dst-address": "0.0.0.0/0", "routing-table": "main", "gateway": "10.0.0.1",
+            "immediate-gw": f"10.0.0.1%{interface}", "distance": str(distance), "active": "true", **overrides}
+
+
+def test_default_routes_are_listed_main_table_first_then_each_table_by_distance():
+    rows = [route("b", 10, active="false"), route("v", 5, **{"routing-table": "VPN"}), route("a", 1),
+            route("w", 1, **{"routing-table": "WARP"}), route("v2", 1, **{"routing-table": "VPN"}),
+            route("x", **{"dst-address": "10.0.0.0/8"})]  # not a default route
+
+    assert [(r.interface, r.table) for r in default_routes(rows)] == [
+        ("a", "main"), ("b", "main"), ("v2", "VPN"), ("v", "VPN"), ("w", "WARP"),
+    ]
+    assert default_routes([route("a", comment="Fiber")])[0].comment == "Fiber"
+    assert default_routes([]) == ()
+
+
+def test_disabled_routes_are_left_out():
+    assert default_routes([route("a", disabled="true"), route("b", 10, disabled="false")]) == (
+        DefaultRoute("b", "10.0.0.1", 10, "main", True, None),
+    )
+
+
+def test_the_interface_is_taken_from_the_immediate_gateway():
+    pppoe = route("x", **{"gateway": "pppoe-out1", "immediate-gw": "pppoe-out1"})
+    assert default_routes([pppoe]) == (DefaultRoute("pppoe-out1", "pppoe-out1", 1, "main", True, None),)
+    shared = route("x", **{"immediate-gw": "10.0.0.1%ether1,10.1.0.1%ether2"})
+    assert default_routes([shared])[0].interface == "ether1,ether2"
+    standby = route("x", **{"immediate-gw": "", "active": "false"})  # the link of a static gateway is down
+    assert default_routes([standby])[0].interface is None
+    assert default_routes([route("x", **{"immediate-gw": "", "gateway": "wg0"})])[0].interface == "wg0"
+    assert default_routes([route("x", **{"immediate-gw": "", "gateway": ""})])[0].interface is None
+    assert default_routes([route("x", distance="n/a")]) == ()  # an unreadable distance
+
+
+async def test_the_uplink_is_read_with_a_query_and_follows_a_failover(router):
+    telemetry, connection, task = await start(router, Features(uplink=True))
+    announced = []
+    telemetry.add_listener(announced.append)
+    await until(lambda: telemetry.routes_known)
+    assert telemetry.uplink == DefaultRoute("ether1", "10.0.0.1", 1, "main", True, "FIB DHCP")
+    assert [r.interface for r in telemetry.routes] == ["ether1", "ether2", "wg0"]  # all, in order
+    assert ("/ip/route/print", {"dst-address": "0.0.0.0/0"}) in router.requested_queries  # not the whole table
+
+    router.tables["/ip/route"] = [route("ether2", 10)]  # the failover happened
+
+    await until(lambda: telemetry.uplink and telemetry.uplink.interface == "ether2")
+    router.tables["/ip/route"] = []
+    await until(lambda: telemetry.uplink is None)
+    assert telemetry.routes_known and announced.count(Channel.UPLINK) >= 3
+    await stop(connection, task)
+
+
+async def test_a_router_without_the_route_menu_keeps_the_session(router):
+    del router.tables["/ip/route"]
+    telemetry, connection, task = await start(router, Features(uplink=True, system=True))
+    await router.wait_for_subscribers(1)
+
+    await router.push("/system/resource/monitor", {"cpu-used": "9", "free-memory": "1024"})
+
+    await until(lambda: telemetry.load)
+    assert not telemetry.routes_known and not task.done()
+    await stop(connection, task)
+
+
+async def test_old_routes_do_not_pass_for_current_ones_while_the_reads_fail(router, monkeypatch):
+    telemetry, connection, task = await start(router, Features(uplink=True))
+    await until(lambda: telemetry.routes_known)
+    announced = []
+    telemetry.add_listener(announced.append)
+
+    router.failing_commands.add("/ip/route/print")
+
+    await until(lambda: not telemetry.routes_known)
+    assert Channel.UPLINK in announced and not task.done()
+    router.failing_commands.clear()
+    await until(lambda: telemetry.routes_known and telemetry.uplink)
     await stop(connection, task)

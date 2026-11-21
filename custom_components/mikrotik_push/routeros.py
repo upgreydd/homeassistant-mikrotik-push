@@ -117,13 +117,20 @@ class RouterOSConnection:
             for q in self._queues.values():
                 q.put_nowait(("!lost", {}))
 
-    async def _send(self, path: str, attrs: dict[str, str]) -> tuple[str, asyncio.Queue]:
+    async def _send(
+        self, path: str, attrs: dict[str, str], queries: dict[str, str] | None = None
+    ) -> tuple[str, asyncio.Queue]:
         if self.closed.is_set():
             raise ConnectionLost("connection closed")
         tag = str(next(self._tags))
         q: asyncio.Queue = asyncio.Queue()
         self._queues[tag] = q
-        words = [path, *(f"={k}={v}" for k, v in attrs.items()), f".tag={tag}"]
+        words = [
+            path,
+            *(f"={k}={v}" for k, v in attrs.items()),
+            *(f"?{k}={v}" for k, v in (queries or {}).items()),  # the router filters, not we
+            f".tag={tag}",
+        ]
         try:
             self._writer.write(encode_sentence(words))
             await self._writer.drain()
@@ -132,13 +139,15 @@ class RouterOSConnection:
             raise
         return tag, q
 
-    async def call(self, path: str, **attrs: str) -> list[dict[str, str]]:
-        """Run a command to completion and return its !re rows.
+    async def call(
+        self, path: str, *, queries: dict[str, str] | None = None, **attrs: str
+    ) -> list[dict[str, str]]:
+        """Run a command to completion and return its !re rows; `queries` select rows on the router.
 
         A router that never answers raises TimeoutError after REQUEST_TIMEOUT; the connection stays usable.
         """
         async with asyncio.timeout(REQUEST_TIMEOUT):
-            tag, q = await self._send(path, attrs)
+            tag, q = await self._send(path, attrs, queries)
             rows: list[dict[str, str]] = []
             try:
                 while True:

@@ -16,10 +16,24 @@ disabled, as Home Assistant does for unknown devices; enable the ones you want.
   - **Traffic**: receive and transmit rate per port.
   - **System**: CPU load, memory usage, last boot, temperatures and voltages, and an `update` entity
     showing the installed and the latest RouterOS version the router knows of (it is read-only: no install).
+  - **Uplink**: one `sensor`, *Active uplink*, holding the interface the router's active default route
+    (IPv4, main routing table) leaves through: the route the router itself uses for traffic without a routing
+    mark. Its attributes `gateway`, `distance` and `comment` describe that route; with several active routes
+    of the same table (load sharing) the lowest distance wins and an ECMP route lists its interfaces
+    separated by commas. Policy routing (VPN or per-client tables) is not modelled: those tables appear
+    in the list, not in the state.
+    The attribute `routes` lists **every enabled** default route (main table first, then each table by
+    distance; each with `interface`, `gateway`, `distance`, `table`, `active`, `comment`), so a template
+    can show any of them. `interface` is empty while the router cannot say (a down link of a static gateway).
+    Pick by a stable key rather than a position, since the list shrinks when a route is withdrawn:
+    `{{ state_attr('sensor.router_active_uplink', 'routes') | selectattr('comment', 'eq', 'LTE DHCP') | map(attribute='active') | first | default(false) }}`.
+    *Unknown* means no active default route in the main table, *unavailable* that the router could not be
+    read. Read every *update interval* (a failover shows up within that time); needs only `read` and `api`.
+    IPv6 is not covered.
 
 The router pushes all of this over the one connection Home Assistant keeps open (see
-[docs/DESIGN.md](docs/DESIGN.md)). No state is polled in a cycle except temperatures (once a minute) and
-the update status (every 6 hours). Two safety checks run besides: a 30 s keepalive and a full re-read of
+[docs/DESIGN.md](docs/DESIGN.md)). No state is polled in a cycle except temperatures (once a minute), the active default route (every update
+interval) and the update status (every 6 hours). Two safety checks run besides: a 30 s keepalive and a full re-read of
 the lease and host tables (and of the port list while ports or traffic are on) every 5 minutes,
 which repair a stream that silently stopped. Measured on
 an RB5009 with every port streaming: no change in router CPU, about 13 kbit/s of traffic.

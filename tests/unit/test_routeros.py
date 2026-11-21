@@ -29,6 +29,20 @@ async def test_call_returns_rows(router):
     await connection.close()
 
 
+async def test_a_query_selects_rows_on_the_router_next_to_the_attributes(router):
+    fake, port = router
+    fake.tables["/ip/route"] = [
+        {"dst-address": "0.0.0.0/0", "distance": "1"}, {"dst-address": "10.0.0.0/8", "distance": "0"},
+    ]
+    connection = await open_connection(port)
+
+    rows = await connection.call("/ip/route/print", queries={"dst-address": "0.0.0.0/0"}, detail="")
+
+    assert rows == [{"dst-address": "0.0.0.0/0", "distance": "1"}]
+    assert fake.requested_queries[-1] == ("/ip/route/print", {"dst-address": "0.0.0.0/0"})
+    await connection.close()
+
+
 async def test_empty_result_is_an_empty_list(router):
     fake, port = router
     fake.tables["/interface/wifi"] = []

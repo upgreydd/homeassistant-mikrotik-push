@@ -32,6 +32,7 @@ class FakeRouter:
         self.failing_commands: set[str] = set()  # commands answered with a trap
         self.login_count = 0
         self.cancelled_tags: list[str] = []
+        self.requested_queries: list[tuple[str, dict[str, str]]] = []  # (command, `?key=value` words)
         self.stream_requests: list[tuple[str, dict[str, str]]] = []  # (command, attributes)
         self._writers: list[asyncio.StreamWriter] = []
         self._subscriptions: list[tuple[asyncio.StreamWriter, str, str]] = []
@@ -66,16 +67,21 @@ class FakeRouter:
         self._writers.append(writer)
         try:
             while True:
-                command, tag, attrs = wire.parse_reply(await wire.read_sentence(reader))
+                words = await wire.read_sentence(reader)
+                command, tag, attrs = wire.parse_reply(words)
+                queries = dict(w[1:].partition("=")[::2] for w in words if w.startswith("?"))
                 if not self.muted:
-                    self._handle(writer, command, tag, attrs)
+                    self.requested_queries.append((command, queries))
+                    self._handle(writer, command, tag, attrs, queries)
                     await writer.drain()
         except (asyncio.IncompleteReadError, OSError):  # includes a TLS shutdown gone wrong
             pass
         finally:
             writer.close()  # like a real server: hang up when the client has gone
 
-    def _handle(self, writer, command: str, tag: str, attrs: dict[str, str]) -> None:
+    def _handle(
+        self, writer, command: str, tag: str, attrs: dict[str, str], queries: dict[str, str]
+    ) -> None:
         if command in self.ignored_commands:
             return
         if command in self.failing_commands:
@@ -111,7 +117,10 @@ class FakeRouter:
         elif command == "/cancel":
             self._cancel(writer, tag, attrs["tag"])
         elif command.endswith("/print") and command.removesuffix("/print") in self.tables:
-            rows = self.tables[command.removesuffix("/print")]
+            rows = [
+                row for row in self.tables[command.removesuffix("/print")]
+                if all(row.get(key) == value for key, value in queries.items())
+            ]
             for row in rows:
                 _reply(writer, tag, "!re", row)
             if not rows:

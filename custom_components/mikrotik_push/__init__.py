@@ -18,6 +18,7 @@ from .const import (
     CONF_TRACK_PORTS,
     CONF_TRACK_SYSTEM,
     CONF_TRACK_TRAFFIC,
+    CONF_TRACK_UPLINK,
     CONF_UPDATE_INTERVAL,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
@@ -59,6 +60,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MikrotikPushConfigEntry)
             ports=entry.options.get(CONF_TRACK_PORTS, False),
             traffic=entry.options.get(CONF_TRACK_TRAFFIC, False),
             system=entry.options.get(CONF_TRACK_SYSTEM, False),
+            uplink=entry.options.get(CONF_TRACK_UPLINK, False),
         )
         telemetry = RouterTelemetry(
             features,

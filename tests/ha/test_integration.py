@@ -629,3 +629,45 @@ async def test_old_hosts_nobody_named_are_forgotten_once_the_router_lists_none_o
         lambda: registry.async_get_entity_id("device_tracker", DOMAIN, f"{entry.entry_id}_AA:BB:CC:00:00:99")
     )
     await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_the_active_uplink_follows_a_failover(hass: HomeAssistant, router):
+    entry = MockConfigEntry(
+        domain=DOMAIN, data=entry_data(router), options={"track_uplink": True, "update_interval": 5}, unique_id="SN123"
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    await until(lambda: state_of(hass, entry, "sensor", "uplink").state == "ether1")
+    attributes = state_of(hass, entry, "sensor", "uplink").attributes
+    assert (attributes["gateway"], attributes["distance"], attributes["comment"]) == ("10.0.0.1", 1, "FIB DHCP")
+    assert [r["interface"] for r in attributes["routes"]] == ["ether1", "ether2", "wg0"]
+
+    router.tables["/ip/route"][0]["active"] = "false"  # the failover moves the default route
+    router.tables["/ip/route"][1]["active"] = "true"
+
+    await until(lambda: state_of(hass, entry, "sensor", "uplink").state == "ether2", timeout=10)  # polled
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_unselecting_the_uplink_removes_its_sensor(hass: HomeAssistant, router):
+    entry = MockConfigEntry(
+        domain=DOMAIN, data=entry_data(router), options={"track_uplink": True}, unique_id="SN123"
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    await until(lambda: state_of(hass, entry, "sensor", "uplink"))
+
+    form = await hass.config_entries.options.async_init(entry.entry_id)
+    await hass.config_entries.options.async_configure(form["flow_id"], {"track_uplink": False})
+    await hass.async_block_till_done()
+
+    await until(lambda: state_of(hass, entry, "sensor", "uplink") is None)
+
+    form = await hass.config_entries.options.async_init(entry.entry_id)
+    await hass.config_entries.options.async_configure(form["flow_id"], {"track_uplink": True})
+    await hass.async_block_till_done()
+
+    await until(lambda: state_of(hass, entry, "sensor", "uplink").state == "ether1")  # back from disabled
+    await hass.config_entries.async_unload(entry.entry_id)
