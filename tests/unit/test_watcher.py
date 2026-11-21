@@ -108,7 +108,7 @@ async def test_reconnect_resyncs_changes_missed_while_offline(router, start_watc
 async def test_a_table_read_that_never_finishes_ends_the_session_and_reconnects(
     router, start_watcher, monkeypatch
 ):
-    monkeypatch.setattr("mikrotik_push.watcher.REQUEST_TIMEOUT", 0.2)
+    monkeypatch.setattr("mikrotik_push.routeros.REQUEST_TIMEOUT", 0.2)
     router.ignored_commands.add(f"{LEASE_PATH}/print")  # this read hangs, the rest works
 
     await start_watcher()

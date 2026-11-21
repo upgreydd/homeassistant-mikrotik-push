@@ -263,6 +263,26 @@ async def test_reconfigure_refuses_a_host_that_could_break_out_of_a_script(
     assert result["errors"] == {CONF_HOST: "invalid_host"}
 
 
+async def test_reconfigure_moves_a_router_without_a_serial_number_known_by_its_address(
+    hass: HomeAssistant, router
+):
+    del router.tables["/system/routerboard"]  # like a CHR: the address is its identity
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={**entry_data(router), CONF_HOST: "10.9.9.9"}, unique_id="10.9.9.9"
+    )
+    entry.add_to_hass(hass)
+
+    form = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        form["flow_id"], {CONF_HOST: "127.0.0.1", CONF_PORT: router.port}
+    )
+
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.unique_id == "127.0.0.1" and entry.data[CONF_HOST] == "127.0.0.1"
+    await hass.async_block_till_done()
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
 async def test_flow_reports_unreadable_tables_as_a_router_error(hass: HomeAssistant, router):
     del router.tables["/interface/bridge/host"]  # the account may not read it
     result = await start_flow(hass)
@@ -549,7 +569,7 @@ async def test_switching_a_feature_off_and_on_keeps_what_the_user_did_to_its_ent
 async def test_setup_is_retried_when_the_router_stops_answering(
     hass: HomeAssistant, router, monkeypatch
 ):
-    monkeypatch.setattr("custom_components.mikrotik_push.REQUEST_TIMEOUT", 0.3)
+    monkeypatch.setattr("custom_components.mikrotik_push.routeros.REQUEST_TIMEOUT", 0.3)
     router.ignored_commands.add("/system/resource/print")
     entry = MockConfigEntry(domain=DOMAIN, data=entry_data(router), unique_id="SN123")
     entry.add_to_hass(hass)
@@ -562,7 +582,7 @@ async def test_setup_is_retried_when_the_router_stops_answering(
 async def test_flow_reports_cannot_connect_when_the_router_stops_answering(
     hass: HomeAssistant, router, monkeypatch
 ):
-    monkeypatch.setattr("custom_components.mikrotik_push.config_flow.REQUEST_TIMEOUT", 0.3)
+    monkeypatch.setattr("custom_components.mikrotik_push.routeros.REQUEST_TIMEOUT", 0.3)
     router.ignored_commands.add("/system/resource/print")
     result = await start_flow(hass)
     result = await hass.config_entries.flow.async_configure(

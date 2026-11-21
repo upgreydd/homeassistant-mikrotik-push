@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-import asyncio
 from dataclasses import dataclass
 
 from homeassistant.config_entries import ConfigEntry
@@ -22,7 +21,6 @@ from .const import (
     CONF_UPDATE_INTERVAL,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
-    REQUEST_TIMEOUT,
 )
 from .entity_ids import feature_of
 from .router_info import RouterInfo, read_router_info
@@ -56,8 +54,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MikrotikPushConfigEntry)
 
     _pin_certificate_on_first_use(hass, entry, connection)
     try:
-        async with asyncio.timeout(REQUEST_TIMEOUT):
-            info = await read_router_info(connection)
+        info = await read_router_info(connection)
         features = Features(
             ports=entry.options.get(CONF_TRACK_PORTS, False),
             traffic=entry.options.get(CONF_TRACK_TRAFFIC, False),

@@ -1,7 +1,7 @@
 """Constants for MikroTik Push."""
 
 DOMAIN = "mikrotik_push"
-REQUEST_TIMEOUT = 15  # seconds a router may take to answer the reads done at setup
+REQUEST_TIMEOUT = 15  # seconds a router may take to answer one command
 CONF_CERT_FINGERPRINT = "certificate_sha256"  # pinned on first use when TLS is not verified
 DEFAULT_PORT = 8729  # api-ssl; plain api is 8728 (cleartext password)
 IDENTITY_PATH = "/system/identity/print"  # cheap read; also used as the keepalive probe

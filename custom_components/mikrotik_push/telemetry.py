@@ -31,6 +31,7 @@ INTERFACE_RESYNC_SECONDS = 300  # a stream that silently stops must not freeze t
 BOOT_TIME_TOLERANCE = timedelta(seconds=60)  # re-reading the uptime must not make the boot time jitter
 PORT_TYPES = frozenset({"ether"})  # includes SFP cages
 _RATE_MBPS = {"Mbps": 1, "Gbps": 1000}
+_READING_FAILURES = (RouterOSError, KeyError, ValueError, TimeoutError)  # TimeoutError: no answer
 _LOAD = "load"
 
 
@@ -225,7 +226,7 @@ class RouterTelemetry:
             await self._load_interfaces(connection)
         except ConnectionLost:
             raise
-        except (RouterOSError, KeyError) as error:
+        except _READING_FAILURES as error:
             _LOGGER.warning("Re-reading the ports failed, will retry: %s", error)
 
     async def _refresh_ports(self, connection: RouterOSConnection) -> None:
@@ -367,7 +368,7 @@ async def _poll(what: str, read: Callable[[], Awaitable[None]], seconds: float) 
             await read()
         except ConnectionLost:
             raise
-        except (RouterOSError, KeyError, ValueError) as error:
+        except _READING_FAILURES as error:
             _LOGGER.log(logging.DEBUG if failing else logging.WARNING, "%s unavailable: %s", what, error)
             failing = True
         else:
@@ -381,7 +382,7 @@ async def _optional(what: str, reading: Awaitable[None]) -> None:
         await reading
     except ConnectionLost:
         raise
-    except (RouterOSError, KeyError, ValueError) as error:
+    except _READING_FAILURES as error:
         _LOGGER.warning("%s unavailable: %s", what, error)
 
 
@@ -390,7 +391,7 @@ async def _ask_rate(connection: RouterOSConnection, port: str) -> int | None:
         rows = await connection.call("/interface/ethernet/monitor", numbers=port, once="")
     except ConnectionLost:
         raise
-    except RouterOSError as error:  # e.g. a port type that has no ethernet monitor
+    except (RouterOSError, TimeoutError) as error:  # e.g. a port type that has no ethernet monitor
         _LOGGER.debug("No speed for %s: %s", port, error)
         return None
     return parse_rate_mbps(rows[0].get("rate")) if rows else None

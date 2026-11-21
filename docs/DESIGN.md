@@ -37,8 +37,8 @@ features (NAT, mangle, filter, queues, captive portal, GPS, UPS).
 6. On link loss all entities become unavailable, then reconnect with exponential backoff (1 s .. 60 s,
    kept across quick failures) and resync.
 7. A rejected login (or a changed pinned certificate) stops the loop and starts the Home Assistant reauth flow.
-8. Table reads at (re)connect and at every resync have a 15 s limit: a router that stops answering ends the
-   session and is reconnected, instead of leaving every tracker unavailable.
+8. Every command has a 15 s limit. A table read that times out ends the session and is reconnected, instead
+   of leaving every tracker unavailable; an optional reading that times out is dropped on its own.
 
 ## Presence definition
 - **Known host:** holds a DHCP lease on the router (enabled). Hosts only seen on the bridge are ignored.

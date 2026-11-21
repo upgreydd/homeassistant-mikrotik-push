@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import socket
 from collections.abc import Mapping
@@ -50,7 +49,6 @@ from .const import (
     DOMAIN,
     MAX_UPDATE_INTERVAL,
     MIN_UPDATE_INTERVAL,
-    REQUEST_TIMEOUT,
 )
 from .router_script import (
     DEFAULT_USERNAME,
@@ -214,10 +212,12 @@ class MikrotikPushConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         _, router_id, fingerprint = probe
         await self.async_set_unique_id(router_id)
-        self._abort_if_unique_id_mismatch()
+        if entry.unique_id != entry.data[CONF_HOST]:
+            self._abort_if_unique_id_mismatch()  # a serial number tells the router apart
+        # else: a router without a serial number is known by its address, which may be what changes
         if fingerprint:
             data[CONF_CERT_FINGERPRINT] = fingerprint
-        return self.async_update_reload_and_abort(entry, data=data)
+        return self.async_update_reload_and_abort(entry, data=data, unique_id=router_id)
 
     async def _router_ip(self) -> str:
         """The helper that finds our source address resolves names on the event loop: do it here."""
@@ -248,10 +248,9 @@ async def _probe_router(data: Mapping[str, Any]) -> tuple[Probe | None, str]:
     try:
         connection = await open_connection(data)
         try:
-            async with asyncio.timeout(REQUEST_TIMEOUT):
-                for path in TABLE_PATHS.values():
-                    await connection.call(f"{path}/print")
-                info = await read_router_info(connection)
+            for path in TABLE_PATHS.values():
+                await connection.call(f"{path}/print")
+            info = await read_router_info(connection)
             fingerprint = connection.peer_certificate_sha256()
         finally:
             await connection.close()

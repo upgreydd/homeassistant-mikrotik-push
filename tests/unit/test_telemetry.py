@@ -274,6 +274,22 @@ async def test_a_failed_resync_does_not_end_the_port_updates(router, monkeypatch
     await stop(connection, task)
 
 
+async def test_a_reading_the_router_never_answers_is_dropped_without_ending_the_session(
+    router, monkeypatch
+):
+    monkeypatch.setattr("mikrotik_push.routeros.REQUEST_TIMEOUT", 0.1)
+    monkeypatch.setattr("mikrotik_push.telemetry.HEALTH_POLL_SECONDS", 0.05)
+    router.ignored_commands.add("/system/health/print")
+    telemetry, connection, task = await start(router, Features(system=True))
+    await asyncio.sleep(0.4)  # several polls time out
+    assert not task.done() and telemetry.health == {}
+
+    router.ignored_commands.clear()
+
+    await until(lambda: telemetry.health)
+    await stop(connection, task)
+
+
 async def test_a_reading_that_failed_is_tried_again_on_the_next_poll(router, monkeypatch):
     monkeypatch.setattr("mikrotik_push.telemetry.HEALTH_POLL_SECONDS", 0.05)
     router.tables["/system/health"] = [{".id": "*1", "name": "cpu-temperature", "value": "N/A", "type": "C"}]

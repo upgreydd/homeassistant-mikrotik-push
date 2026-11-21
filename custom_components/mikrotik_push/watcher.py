@@ -7,7 +7,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from .const import IDENTITY_PATH, REQUEST_TIMEOUT
+from .const import IDENTITY_PATH
 from .registry import HostRegistry, Row, Table
 from .routeros import AccessRefused, RouterOSConnection, RouterOSError, forward_events
 from .telemetry import RouterTelemetry
@@ -137,11 +137,9 @@ class RouterWatcher:
             self._publish(Change(frozenset(self.registry.apply(table, event))))
 
     async def _load_snapshot(self, connection: RouterOSConnection) -> set[str]:
-        """Read both tables; a router that stops answering must end the session, not stall it."""
         changed: set[str] = set()
-        async with asyncio.timeout(REQUEST_TIMEOUT):
-            for table, path in TABLE_PATHS.items():
-                changed |= self.registry.replace(table, await connection.call(f"{path}/print"))
+        for table, path in TABLE_PATHS.items():
+            changed |= self.registry.replace(table, await connection.call(f"{path}/print"))
         return changed
 
     async def _resync_periodically(self, connection: RouterOSConnection) -> None:

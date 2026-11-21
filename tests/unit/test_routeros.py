@@ -37,6 +37,22 @@ async def test_empty_result_is_an_empty_list(router):
     await connection.close()
 
 
+async def test_a_command_the_router_never_answers_times_out_and_the_link_stays_usable(
+    router, monkeypatch
+):
+    monkeypatch.setattr("mikrotik_push.routeros.REQUEST_TIMEOUT", 0.1)
+    fake, port = router
+    fake.ignored_commands.add("/system/identity/print")
+    connection = await open_connection(port)
+
+    with pytest.raises(TimeoutError):
+        await connection.call("/system/identity/print")
+
+    fake.ignored_commands.clear()
+    assert await connection.call("/system/identity/print") == [{"name": "fake"}]
+    await connection.close()
+
+
 async def test_trap_raises(router):
     _, port = router
     connection = await open_connection(port)

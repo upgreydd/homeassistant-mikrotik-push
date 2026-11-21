@@ -14,6 +14,7 @@ import logging
 import ssl
 from collections.abc import AsyncIterator, Callable
 
+from .const import REQUEST_TIMEOUT
 from .wire import encode_sentence, parse_reply, read_sentence
 
 _LOGGER = logging.getLogger(__name__)
@@ -132,20 +133,24 @@ class RouterOSConnection:
         return tag, q
 
     async def call(self, path: str, **attrs: str) -> list[dict[str, str]]:
-        """Run a command to completion and return its !re rows."""
-        tag, q = await self._send(path, attrs)
-        rows: list[dict[str, str]] = []
-        try:
-            while True:
-                kind, data = await _next_reply(q)
-                if kind == "!re":
-                    rows.append(data)
-                elif kind == "!done":
-                    return rows
-                else:  # !trap / !fatal
-                    raise RouterOSError(data.get("message", kind))
-        finally:
-            del self._queues[tag]
+        """Run a command to completion and return its !re rows.
+
+        A router that never answers raises TimeoutError after REQUEST_TIMEOUT; the connection stays usable.
+        """
+        async with asyncio.timeout(REQUEST_TIMEOUT):
+            tag, q = await self._send(path, attrs)
+            rows: list[dict[str, str]] = []
+            try:
+                while True:
+                    kind, data = await _next_reply(q)
+                    if kind == "!re":
+                        rows.append(data)
+                    elif kind == "!done":
+                        return rows
+                    else:  # !trap / !fatal
+                        raise RouterOSError(data.get("message", kind))
+            finally:
+                del self._queues[tag]
 
     def listen(self, path: str, **attrs: str) -> AsyncIterator[dict[str, str]]:
         """Yield rows of `<path>/listen`; a removed item arrives as `.id` plus `.dead`.

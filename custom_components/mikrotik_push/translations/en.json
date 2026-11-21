@@ -29,7 +29,7 @@
       },
       "reconfigure": {
         "title": "Change the router address",
-        "description": "Use this when the router got another address or the API port changed. The entry keeps its entities; the router must be the same one (same serial number).",
+        "description": "Use this when the router got another address or the API port changed. The entry keeps its entities; the router must be the same one (same serial number, when it has one).",
         "data": {
           "host": "Router address (IP or name)",
           "port": "API port (8729 = api-ssl, 8728 = plain api)"
