@@ -26,6 +26,14 @@
           "password": "Password",
           "setup_script": "Router setup script"
         }
+      },
+      "reconfigure": {
+        "title": "Change the router address",
+        "description": "Use this when the router got another address or the API port changed. The entry keeps its entities; the router must be the same one (same serial number).",
+        "data": {
+          "host": "Router address (IP or name)",
+          "port": "API port (8729 = api-ssl, 8728 = plain api)"
+        }
       }
     },
     "error": {
@@ -39,7 +47,8 @@
     "abort": {
       "already_configured": "This router is already configured.",
       "reauth_successful": "Signed in again.",
-      "unique_id_mismatch": "This is a different router than the one this entry was set up for."
+      "unique_id_mismatch": "This is a different router than the one this entry was set up for.",
+      "reconfigure_successful": "The router address was updated."
     }
   },
   "options": {

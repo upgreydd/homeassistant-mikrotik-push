@@ -16,7 +16,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from fake_router import until
-from tests.ha.test_integration import start_flow
+from ha_helpers import start_flow
 
 
 def tls_data(router, **extra):

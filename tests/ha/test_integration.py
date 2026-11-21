@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 from fake_router import until
+from ha_helpers import start_flow
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from custom_components.mikrotik_push.const import DOMAIN
@@ -16,7 +17,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
 PHONE_MAC = "AA:BB:CC:DD:EE:01"
@@ -35,11 +35,6 @@ def field_default(form, name):
 
 def password_default(form):
     return field_default(form, CONF_PASSWORD)
-
-
-async def start_flow(hass):
-    await async_setup_component(hass, "network", {})
-    return await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
 
 
 async def test_flow_shows_a_setup_script_with_the_prefilled_one_time_password(
@@ -209,6 +204,63 @@ async def test_reauth_accepts_the_new_password_and_reloads(hass: HomeAssistant, 
     assert entry.data[CONF_PASSWORD] == "secret"
     await hass.async_block_till_done()
     await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_the_flow_hands_the_source_address_helper_an_ip_not_a_name(hass: HomeAssistant, router):
+    with patch(
+        "custom_components.mikrotik_push.config_flow.async_get_source_ip", return_value="10.0.0.2"
+    ) as source_ip:
+        result = await start_flow(hass)
+        await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_HOST: "localhost"})
+
+    assert source_ip.call_args.kwargs["target_ip"] == "127.0.0.1"
+
+
+async def test_reconfigure_moves_an_entry_that_cannot_reach_its_router(hass: HomeAssistant, router):
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={**entry_data(router), CONF_PORT: 1}, unique_id="SN123"
+    )
+    entry.add_to_hass(hass)
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+
+    form = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        form["flow_id"], {CONF_HOST: "127.0.0.1", CONF_PORT: router.port}
+    )
+
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data[CONF_PORT] == router.port
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_reconfigure_refuses_another_router(hass: HomeAssistant, router):
+    router.tables["/system/routerboard"] = [{"serial-number": "OTHER"}]
+    entry = MockConfigEntry(domain=DOMAIN, data=entry_data(router), unique_id="SN123")
+    entry.add_to_hass(hass)
+
+    form = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        form["flow_id"], {CONF_HOST: "127.0.0.1", CONF_PORT: router.port}
+    )
+
+    assert result["reason"] == "unique_id_mismatch"
+
+
+async def test_reconfigure_refuses_a_host_that_could_break_out_of_a_script(
+    hass: HomeAssistant, router
+):
+    entry = MockConfigEntry(domain=DOMAIN, data=entry_data(router), unique_id="SN123")
+    entry.add_to_hass(hass)
+
+    form = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        form["flow_id"], {CONF_HOST: 'x"; /system reset', CONF_PORT: router.port}
+    )
+
+    assert result["errors"] == {CONF_HOST: "invalid_host"}
 
 
 async def test_flow_reports_unreadable_tables_as_a_router_error(hass: HomeAssistant, router):

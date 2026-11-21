@@ -211,18 +211,22 @@ class RouterTelemetry:
         while True:
             event = await events.get()
             if event is None:
-                try:
-                    await self._load_interfaces(connection)
-                except ConnectionLost:
-                    raise
-                except (RouterOSError, KeyError) as error:
-                    _LOGGER.warning("Re-reading the ports failed, will retry: %s", error)
-                    continue
-            elif event.get(".dead") in ("true", "yes"):
+                await self._resync_interfaces(connection)
+                continue
+            if event.get(".dead") in ("true", "yes"):
                 self._interfaces.pop(event[".id"], None)
             else:
                 self._interfaces[event[".id"]] = {**self._interfaces.get(event[".id"], {}), **event}
             await self._refresh_ports(connection)
+
+    async def _resync_interfaces(self, connection: RouterOSConnection) -> None:
+        """Re-read the port list; a failed read is retried at the next resync, not fatal."""
+        try:
+            await self._load_interfaces(connection)
+        except ConnectionLost:
+            raise
+        except (RouterOSError, KeyError) as error:
+            _LOGGER.warning("Re-reading the ports failed, will retry: %s", error)
 
     async def _refresh_ports(self, connection: RouterOSConnection) -> None:
         ports: dict[str, Port] = {}
@@ -238,6 +242,7 @@ class RouterTelemetry:
             ports[key] = Port(name, running, rate)
         changed = ports != self.ports
         self.ports = ports
+        self.traffic = {key: value for key, value in self.traffic.items() if key in ports}
         if self._traffic_names() != self._streamed_names:
             self._ports_changed.set()
         if changed and self.features.ports:

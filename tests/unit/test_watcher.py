@@ -105,6 +105,17 @@ async def test_reconnect_resyncs_changes_missed_while_offline(router, start_watc
     await until(lambda: watcher.connected and watcher.registry.hosts[MAC].connected)
 
 
+async def test_a_table_read_that_never_finishes_ends_the_session_and_reconnects(
+    router, start_watcher, monkeypatch
+):
+    monkeypatch.setattr("mikrotik_push.watcher.REQUEST_TIMEOUT", 0.2)
+    router.ignored_commands.add(f"{LEASE_PATH}/print")  # this read hangs, the rest works
+
+    await start_watcher()
+
+    await until(lambda: router.login_count >= 2)  # without the timeout it would wait forever
+
+
 async def test_silent_link_is_detected_by_the_keepalive(router, start_watcher):
     timing = Timing(departure_grace=0, keepalive_interval=0.05, keepalive_timeout=0.1,
                     first_retry_delay=0.02, max_retry_delay=0.1)

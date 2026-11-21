@@ -218,6 +218,21 @@ async def test_a_removed_interface_disappears(router):
     await stop(connection, task)
 
 
+async def test_the_traffic_of_a_removed_port_does_not_linger(router):
+    telemetry, connection, task = await start(router, Features(ports=True, traffic=True), 0.05)
+    await router.wait_for_subscribers(2)
+    await router.push(
+        "/interface/monitor-traffic",
+        {"name": "ether2", "rx-bits-per-second": "1", "tx-bits-per-second": "2"},
+    )
+    await until(lambda: "ether2" in telemetry.traffic)
+
+    await router.push("/interface", {".id": "*2", ".dead": "true"})
+
+    await until(lambda: "ether2" not in telemetry.traffic)
+    await stop(connection, task)
+
+
 async def test_the_update_is_unknown_until_the_router_has_checked(router):
     router.tables["/system/package/update"] = [
         {"installed-version": "7.25.1", "latest-version": "", "status": "ERROR: could not connect"}

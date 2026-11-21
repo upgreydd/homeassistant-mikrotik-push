@@ -43,10 +43,6 @@ class ConnectionLost(RouterOSError):
     """The TCP connection died; the caller must reconnect and resync."""
 
 
-class StreamEnded(ConnectionLost):
-    """The router closed a `listen` stream that should run forever."""
-
-
 _BAD_CREDENTIALS = "invalid user name or password"  # RouterOS login error (6)
 _CANCEL_TIMEOUT = 1
 
@@ -206,4 +202,4 @@ async def forward_events(
     """Hand every `listen` event of `path` to `deliver`; ending at all counts as a lost link."""
     async for event in connection.listen(path):
         deliver(event)
-    raise StreamEnded(f"{path} stream ended")
+    raise ConnectionLost(f"{path} stream ended")

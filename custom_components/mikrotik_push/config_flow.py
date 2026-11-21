@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 from collections.abc import Mapping
 from typing import Any
 
@@ -55,6 +56,7 @@ from .router_script import (
     DEFAULT_USERNAME,
     build_setup_script,
     generate_password,
+    is_ip,
     is_plain,
     is_safe_host,
 )
@@ -143,32 +145,20 @@ class MikrotikPushConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         entry = self._get_reauth_entry()
         self._host = entry.data[CONF_HOST]
-        placeholders = {}
         if user_input is not None:
             data = {**entry.data, CONF_PASSWORD: user_input[CONF_PASSWORD]}
-            if self._shown_certificate:
-                # The user saw this fingerprint and submitted again: trust exactly that one.
-                data[CONF_CERT_FINGERPRINT] = self._shown_certificate
-            try:
-                probe, error = await _probe_router(data)
-            except CertificateChanged as changed:
-                # Refused before the login, so the password has not left Home Assistant.
-                self._shown_certificate = changed.presented_sha256
-                probe, error = None, "certificate_changed"
+            probe, error = await self._probe_confirming_certificate(data)
             if probe is not None:
-                _, router_id, fingerprint = probe
-                await self.async_set_unique_id(router_id)
-                self._abort_if_unique_id_mismatch()
-                if fingerprint:
-                    data[CONF_CERT_FINGERPRINT] = fingerprint
-                return self.async_update_reload_and_abort(entry, data=data)
+                return await self._update_same_router(entry, data, probe)
             errors["base"] = error
-            placeholders["fingerprint"] = self._shown_certificate or ""
         script, ha_address = await self._setup_instructions(entry.data[CONF_USERNAME])
         return self.async_show_form(
             step_id="reauth_confirm",
             errors=errors,
-            description_placeholders={"ha_address": ha_address, **placeholders},
+            description_placeholders={
+                "ha_address": ha_address,
+                "fingerprint": self._shown_certificate or "",
+            },
             data_schema=vol.Schema(
                 {
                     vol.Optional(_SCRIPT_KEY, default=script): _SCRIPT_FIELD,
@@ -177,11 +167,70 @@ class MikrotikPushConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
         )
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Move the entry to a new address or port without losing its entities."""
+        errors: dict[str, str] = {}
+        entry = self._get_reconfigure_entry()
+        if user_input is not None:
+            if is_safe_host(user_input[CONF_HOST].strip()):
+                data = {**entry.data, **user_input, CONF_HOST: user_input[CONF_HOST].strip()}
+                probe, error = await self._probe_confirming_certificate(data)
+                if probe is not None:
+                    return await self._update_same_router(entry, data, probe)
+                errors["base"] = error
+            else:
+                errors[CONF_HOST] = "invalid_host"
+        current = user_input or entry.data
+        return self.async_show_form(
+            step_id="reconfigure",
+            errors=errors,
+            description_placeholders={"fingerprint": self._shown_certificate or ""},
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_HOST, default=current[CONF_HOST]): str,
+                    vol.Required(CONF_PORT, default=current[CONF_PORT]): cv.port,
+                }
+            ),
+        )
+
+    async def _probe_confirming_certificate(
+        self, data: dict[str, Any]
+    ) -> tuple[Probe | None, str]:
+        """Probe with the stored pin; a changed certificate is shown first, trusted on a repeat."""
+        if self._shown_certificate:
+            # The user saw this fingerprint and submitted again: trust exactly that one.
+            data[CONF_CERT_FINGERPRINT] = self._shown_certificate
+        try:
+            return await _probe_router(data)
+        except CertificateChanged as changed:
+            # Refused before the login, so the password has not left Home Assistant.
+            self._shown_certificate = changed.presented_sha256
+            return None, "certificate_changed"
+
+    async def _update_same_router(
+        self, entry: ConfigEntry, data: dict[str, Any], probe: Probe
+    ) -> ConfigFlowResult:
+        _, router_id, fingerprint = probe
+        await self.async_set_unique_id(router_id)
+        self._abort_if_unique_id_mismatch()
+        if fingerprint:
+            data[CONF_CERT_FINGERPRINT] = fingerprint
+        return self.async_update_reload_and_abort(entry, data=data)
+
+    async def _router_ip(self) -> str:
+        """The helper that finds our source address resolves names on the event loop: do it here."""
+        if is_ip(self._host):
+            return self._host
+        addresses = await self.hass.loop.getaddrinfo(self._host, None, family=socket.AF_INET)
+        return addresses[0][4][0]
+
     async def _setup_instructions(self, username: str) -> tuple[str, str]:
         """The script to paste on the router and the Home Assistant address it binds to."""
         try:
-            ha_address = await async_get_source_ip(self.hass, target_ip=self._host)
-        except HomeAssistantError:
+            ha_address = await async_get_source_ip(self.hass, target_ip=await self._router_ip())
+        except (HomeAssistantError, OSError):
             ha_address = None
         if not is_plain(username):
             return (

@@ -44,6 +44,9 @@ recorder:
       - sensor.router_memory_usage
 ```
 
+If the router gets another address or API port, use *Reconfigure* on the integration entry (the router must
+be the same one); entities, names and dashboards stay.
+
 ## Install (HACS custom repository)
 HACS -> Integrations -> three dots -> Custom repositories -> add this repository as *Integration*, install,
 restart Home Assistant, then Settings -> Devices & services -> Add integration -> *MikroTik Push*.

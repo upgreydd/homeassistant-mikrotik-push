@@ -17,8 +17,14 @@ features (NAT, mangle, filter, queues, captive portal, GPS, UPS).
 | `routeros.py` | one TCP/TLS connection, login, commands multiplexed by `.tag`, `listen` streams |
 | `registry.py` | merges DHCP leases and bridge hosts into hosts by MAC; departure grace (pure) |
 | `watcher.py` | snapshot + streams + periodic resync + keepalive + reconnect; HA-free |
+| `telemetry.py` | optional readings: port state, traffic, CPU/memory, health, RouterOS update; HA-free |
+| `router_info.py` | name, model, serial number and version, read once per connection |
 | `router_script.py` | generates the router-side setup script with a one-time password (pure) |
-| `config_flow.py`, `__init__.py`, `device_tracker.py` | Home Assistant glue |
+| `connection.py` | opens a connection from a config entry's data (TLS context, certificate pin) |
+| `config_flow.py` | setup, reauth, reconfigure and the options flow |
+| `__init__.py` | entry setup and unload, router device, disabling the entities of unselected features |
+| `device_tracker.py` | one tracker per leased host, forgetting stale ones |
+| `entity.py`, `entity_ids.py`, `sensor.py`, `binary_sensor.py`, `update.py` | the optional entities and their unique ids |
 
 ## Data flow
 1. Connect, log in. Start `listen` on `/ip/dhcp-server/lease` and `/interface/bridge/host`.
@@ -30,7 +36,9 @@ features (NAT, mangle, filter, queues, captive portal, GPS, UPS).
 5. A cheap command every 30 s detects a dead link that a quiet stream would never reveal.
 6. On link loss all entities become unavailable, then reconnect with exponential backoff (1 s .. 60 s,
    kept across quick failures) and resync.
-7. A rejected login stops the loop and starts the Home Assistant reauth flow.
+7. A rejected login (or a changed pinned certificate) stops the loop and starts the Home Assistant reauth flow.
+8. Table reads at (re)connect and at every resync have a 15 s limit: a router that stops answering ends the
+   session and is reconnected, instead of leaving every tracker unavailable.
 
 ## Presence definition
 - **Known host:** holds a DHCP lease on the router (enabled). Hosts only seen on the bridge are ignored.
@@ -58,7 +66,7 @@ them at most once per update interval, so entities are not written more often th
 Measured cost with every port streaming at 5 s: router CPU 5.8 % with and without, 1.7 KB/s.
 Ports are identified by their factory name (`default-name`), so renaming one in WinBox keeps its entities
 and history; the traffic stream restarts when the set of port names changes. Entities of a port that no
-longer exists stay unavailable until deleted by hand. A failing optional reading (no permission, a
+longer exists become unavailable and stay until deleted by hand. A failing optional reading (no permission, a
 firmware without that command) is logged and dropped on its own; it never ends the session presence
 depends on. Readings are cleared when a new connection starts, because the router may have rebooted.
 The port list is re-read every 5 minutes like the presence tables (a speed change without a link change
@@ -105,6 +113,7 @@ the script.
 
 ## Roadmap
 1. Long capture on the real router (AP reboot, sleeping phones) and tune the grace.
-2. Options flow (grace, which VLANs/bridges to track), diagnostics, minimum RouterOS version check, Wi-Fi registration table as a faster signal.
-3. Interface/WAN state and system sensors, `update` entity; netwatch webhook push.
+2. Options for the grace and for which VLANs/bridges to track, diagnostics, a minimum RouterOS version
+   check, the Wi-Fi registration table as a faster signal.
+3. Traffic on PPPoE/VLAN/WireGuard interfaces, a RouterBOARD firmware `update` entity; netwatch webhook push.
 4. Release tag equal to the manifest version, submit to `hacs/default`.

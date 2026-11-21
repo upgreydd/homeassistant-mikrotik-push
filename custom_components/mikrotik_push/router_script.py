@@ -28,8 +28,10 @@ def generate_password() -> str:
 
 def is_safe_host(host: str) -> bool:
     """Hosts end up inside a script the user pastes into their router: only IPs and DNS names."""
-    if _HOSTNAME.fullmatch(host):
-        return True
+    return bool(_HOSTNAME.fullmatch(host)) or is_ip(host)
+
+
+def is_ip(host: str) -> bool:
     try:
         ipaddress.ip_address(host)
     except ValueError:
