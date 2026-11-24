@@ -61,9 +61,13 @@ recorder:
 If the router gets another address or API port, use *Reconfigure* on the integration entry (the router must
 be the same one); entities, names and dashboards stay.
 
-## Install (HACS custom repository)
-HACS -> Integrations -> three dots -> Custom repositories -> add this repository as *Integration*, install,
-restart Home Assistant, then Settings -> Devices & services -> Add integration -> *MikroTik Push*.
+## Install
+In HACS search for *MikroTik Push* (or
+[open it in HACS directly](https://my.home-assistant.io/redirect/hacs_repository/?owner=upgreydd&repository=homeassistant-mikrotik-push&category=integration)),
+download it, restart Home Assistant, then Settings -> Devices & services -> Add integration -> *MikroTik Push*.
+
+If it does not show up in the search (an older HACS), add it as a custom repository instead:
+HACS -> three dots -> Custom repositories -> add this repository as *Integration*, then continue as above.
 
 ## Develop
 ```
