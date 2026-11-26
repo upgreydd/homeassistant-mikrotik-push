@@ -14,7 +14,16 @@ DEFAULT_USERNAME = "mikrotik-push"
 CERTIFICATE_NAME = "mikrotik-push-api"
 CA_NAME = "mikrotik-push-ca"
 UPDATE_CHECK_NAME = "mikrotik-push-update-check"
-UPDATE_CHECK_COMMAND = "/system package update check-for-updates"
+# The API user (read,api) cannot see the check's result (RouterOS 7.25 answers it "finding out latest
+# version..." forever), so the task that checks also writes the result into its own comment.
+UPDATE_CHECK_COMMAND = (
+    '/system package update check-for-updates; :local s ""; '
+    ':for i from=1 to=60 do={ :set s [/system package update get status]; '
+    ':if ([:pick $s ([:len $s] - 3) [:len $s]] = "...") do={ :delay 1s } }; '
+    '/system scheduler set [find name="mikrotik-push-update-check"] '
+    'comment=("Home Assistant (MikroTik Push): latest=" . [/system package update get latest-version] '
+    '. "; status=" . $s)'
+)
 COMMENT = "Home Assistant (MikroTik Push)"
 POLICY = "read,api"
 
@@ -81,11 +90,17 @@ def build_setup_script(
             "/ip service set api-ssl disabled=no",
             "# The router only learns of new RouterOS versions when told to look; do it daily.",
             f':if ([:len [/system scheduler find name="{UPDATE_CHECK_NAME}"]] = 0) do={{ '
-            f'/system scheduler add name="{UPDATE_CHECK_NAME}" interval=1d policy=read,write,test '
-            f'comment="{COMMENT}" on-event="{UPDATE_CHECK_COMMAND}" }}',
+            f'/system scheduler add name="{UPDATE_CHECK_NAME}" interval=1d comment="{COMMENT}" }}',
+            f'/system scheduler set [find name="{UPDATE_CHECK_NAME}"] policy=read,write,test '
+            f'on-event="{_quoted(UPDATE_CHECK_COMMAND)}"',
             f":do {{ {UPDATE_CHECK_COMMAND} }} on-error={{}}",
         ]
     )
+
+
+def _quoted(code: str) -> str:
+    """Code inside a RouterOS double-quoted string: `$` would be expanded now, not when the task runs."""
+    return code.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
 
 
 def _wait_for_key(name: str) -> str:

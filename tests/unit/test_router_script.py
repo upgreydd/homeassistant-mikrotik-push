@@ -69,8 +69,17 @@ def test_a_daily_update_check_is_scheduled_once_and_run_now():
     lines = build().splitlines()
     scheduler = next(line for line in lines if "/system scheduler add" in line)
     assert scheduler.startswith(':if ([:len [/system scheduler find name="mikrotik-push-update-check"]] = 0)')
-    assert "interval=1d" in scheduler and "check-for-updates" in scheduler
-    assert any(line.startswith(":do { /system package update check-for-updates }") for line in lines)
+    assert "interval=1d" in scheduler
+    assert f":do {{ {script.UPDATE_CHECK_COMMAND} }} on-error={{}}" in lines
+
+
+def test_pasting_again_brings_an_older_update_check_task_up_to_date():
+    task = next(line for line in build().splitlines() if line.startswith("/system scheduler set"))
+    assert 'find name="mikrotik-push-update-check"' in task and "policy=read,write,test" in task
+    # inside on-event="...": quotes escaped, $ not expanded at paste time, nothing else changed
+    on_event = task.split('on-event="', 1)[1][:-1]
+    assert on_event.replace('\\"', '"').replace("\\$", "$") == script.UPDATE_CHECK_COMMAND
+    assert '"' not in on_event.replace('\\"', "")
 
 
 def test_the_update_check_does_not_widen_the_api_users_policies():

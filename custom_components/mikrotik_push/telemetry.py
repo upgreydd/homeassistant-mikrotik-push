@@ -12,12 +12,14 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import re
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from .router_info import parse_uptime
+from .router_script import UPDATE_CHECK_NAME
 from .routeros import ConnectionLost, RouterOSConnection, RouterOSError, forward_events
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,6 +36,7 @@ INTERFACE_RESYNC_SECONDS = 300  # a stream that silently stops must not freeze t
 BOOT_TIME_TOLERANCE = timedelta(seconds=60)  # re-reading the uptime must not make the boot time jitter
 PORT_TYPES = frozenset({"ether"})  # includes SFP cages
 _RATE_MBPS = {"Mbps": 1, "Gbps": 1000}
+_UPDATE_CHECK_RESULT = re.compile(r"latest=(?P<latest>[^;]*); status=(?P<status>.*)")  # see router_script
 _READING_FAILURES = (RouterOSError, KeyError, ValueError, TimeoutError)  # TimeoutError: no answer
 _LOAD = "load"
 
@@ -408,11 +411,13 @@ class RouterTelemetry:
     async def _read_update(self, connection: RouterOSConnection) -> None:
         rows = await connection.call("/system/package/update/print")
         if rows and rows[0].get("installed-version"):
-            row = rows[0]
+            # The API user never sees the check's result here; the daily check task leaves it in its comment.
+            checks = await connection.call("/system/scheduler/print", queries={"name": UPDATE_CHECK_NAME})
+            result = _UPDATE_CHECK_RESULT.search(checks[0].get("comment", "")) if checks else None
             update = RouterOsUpdate(
-                installed=row["installed-version"],
-                latest=row.get("latest-version") or None,
-                status=row.get("status", ""),
+                installed=rows[0]["installed-version"],
+                latest=(result["latest"] or None) if result else None,
+                status=result["status"] if result else "",
             )
             if update != self.update:
                 self.update = update

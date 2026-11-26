@@ -33,9 +33,14 @@ async def router():
                  "board-name": "RB5009UG+S+"}
             ],
             "/system/routerboard": [{"model": "RB5009UG+S+", "serial-number": "SN1"}],
+            # What the read-only API user sees (RouterOS 7.25.1): never a result of the check.
             "/system/package/update": [
-                {"installed-version": "7.25.1", "latest-version": "7.26", "channel": "stable",
-                 "status": "New version is available"}
+                {"installed-version": "7.25.1", "channel": "stable", "status": "finding out latest version..."}
+            ],
+            "/system/scheduler": [
+                {".id": "*1", "name": "other-task", "comment": "latest=9.9; status=wrong task"},
+                {".id": "*2", "name": "mikrotik-push-update-check",
+                 "comment": "Home Assistant (MikroTik Push): latest=7.26; status=New version is available"},
             ],
             "/system/health": [
                 {".id": "*1", "name": "cpu-temperature", "value": "51", "type": "C"},
@@ -252,14 +257,27 @@ async def test_the_traffic_of_a_removed_port_does_not_linger(router):
 
 
 async def test_the_update_is_unknown_until_the_router_has_checked(router):
-    router.tables["/system/package/update"] = [
-        {"installed-version": "7.25.1", "latest-version": "", "status": "ERROR: could not connect"}
+    router.tables["/system/scheduler"] = [
+        {".id": "*1", "name": "mikrotik-push-update-check", "comment": "Home Assistant (MikroTik Push)"}
     ]
     telemetry, connection, task = await start(router, Features(system=True))
 
     await until(lambda: telemetry.update)
 
-    assert telemetry.update.latest is None and telemetry.update.installed == "7.25.1"
+    assert telemetry.update == RouterOsUpdate("7.25.1", None, "")
+    await stop(connection, task)
+
+
+async def test_a_failed_check_shows_the_routers_error(router):
+    router.tables["/system/scheduler"] = [
+        {".id": "*1", "name": "mikrotik-push-update-check",
+         "comment": "Home Assistant (MikroTik Push): latest=; status=ERROR: could not resolve dns name"}
+    ]
+    telemetry, connection, task = await start(router, Features(system=True))
+
+    await until(lambda: telemetry.update)
+
+    assert telemetry.update == RouterOsUpdate("7.25.1", None, "ERROR: could not resolve dns name")
     await stop(connection, task)
 
 

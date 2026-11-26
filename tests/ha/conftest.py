@@ -38,7 +38,11 @@ def populate(fake: FakeRouter) -> None:
                  "board-name": "RB-TEST"}
             ],
             "/system/package/update": [
-                {"installed-version": "7.25.1", "latest-version": "7.26", "status": "New"}
+                {"installed-version": "7.25.1", "status": "finding out latest version..."}
+            ],
+            "/system/scheduler": [
+                {".id": "*1", "name": "mikrotik-push-update-check",
+                 "comment": "Home Assistant (MikroTik Push): latest=7.26; status=New"}
             ],
             "/system/health": [{".id": "*1", "name": "cpu-temperature", "value": "51", "type": "C"}],
             "/ip/route": [
