@@ -13,8 +13,11 @@ Terminal), then press Submit. The script:
   certificate setup is never overwritten (a half-finished attempt of ours is removed and redone);
 - enables `api-ssl`;
 - adds a scheduler task `mikrotik-push-update-check` (once a day, plus one run when you paste the
-  script) so the router learns of new RouterOS versions; the Home Assistant `update` entity shows the result.
+  script) so the router learns of new RouterOS versions, and writes the result into the task's comment
+  (`latest=7.26; status=New version is available`); the Home Assistant `update` entity shows it. The read-only
+  API user cannot see the result of a check itself (it only ever gets "finding out latest version...").
   The task runs with its own policies (`read,write,test`), not with the API user's, which stays `read,api`.
+  If the `update` entity stays *unknown*, paste the script again: routers set up before 0.2.2 lack this task.
 
 Pasting it again rotates the password. When the router rejects the login later (password changed, user
 removed), Home Assistant starts a re-authentication that shows a fresh script and password. The policies it uses are enough for `print` and `listen`

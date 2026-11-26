@@ -60,7 +60,7 @@ Home Assistant opens the one connection and subscribes; the router then pushes d
 | Traffic rx/tx per port | `/interface/monitor-traffic interval=5s`, one command for all ports | router maximum interval is 5 s |
 | CPU, free memory | `/system/resource/monitor interval=5s` | |
 | Temperatures, voltages | `/system/health/print` every 60 s (no stream exists) | one call per minute |
-| RouterOS version | `/system/package/update/print` every 6 h (needs no write permission) | |
+| RouterOS version | every 6 h: installed from `/system/package/update/print`, latest and status from the comment of the `mikrotik-push-update-check` scheduler task (the read-only user never sees a check result) | |
 | Active uplink | `/ip/route/print ?dst-address=0.0.0.0/0` every update interval; the active route of the main table (a table can be huge, so it is not streamed and the router does the filtering) | one small call per interval |
 The router accepts intervals of 20 ms to 5 s only; Home Assistant coalesces the 5 s samples and announces
 them at most once per update interval, so entities are not written more often than that.
