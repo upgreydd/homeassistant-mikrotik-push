@@ -146,12 +146,27 @@ async def test_departure_is_reported_when_the_grace_period_ends(router, start_wa
     changes = []
     watcher.add_listener(lambda _change: changes.append(watcher.registry.hosts[MAC].connected))
 
+    router.tables[BRIDGE_PATH] = []
     await router.push(BRIDGE_PATH, BRIDGE_HOST_GONE)
     await until(lambda: changes)
     assert changes[-1] is True  # port flushed, but still counted as home
 
     await until(lambda: not watcher.registry.hosts[MAC].connected)  # timer fires, no event needed
     assert changes[-1] is False
+
+
+async def test_a_departure_the_routers_table_does_not_confirm_is_ignored(router, start_watcher):
+    """Seen in the field: the stream reports a host gone while the router still has its entry."""
+    router.tables[BRIDGE_PATH] = [BRIDGE_HOST]
+    timing = Timing(departure_grace=0.1, resync_interval=60)
+    watcher = (await start_watcher(timing)).watcher
+    await until(lambda: watcher.connected and watcher.registry.hosts[MAC].connected)
+
+    await router.push(BRIDGE_PATH, BRIDGE_HOST_GONE)  # the table still holds the entry
+    await asyncio.sleep(0.4)  # well past the grace period
+
+    assert watcher.registry.hosts[MAC].connected
+    assert watcher.registry.seconds_until_grace_ends() is None
 
 
 async def test_a_failing_listener_does_not_stop_the_watcher(router, start_watcher):

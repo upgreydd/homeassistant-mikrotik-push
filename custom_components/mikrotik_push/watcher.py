@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -65,6 +66,7 @@ class RouterWatcher:
         self._retry_delay = timing.first_retry_delay
         self._listeners: list[Listener] = []
         self._grace_timer: asyncio.TimerHandle | None = None
+        self._resync_now = asyncio.Event()
         self._run_task: asyncio.Task | None = None
 
     def stop(self) -> None:
@@ -143,13 +145,19 @@ class RouterWatcher:
         return changed
 
     async def _resync_periodically(self, connection: RouterOSConnection) -> None:
-        """Self-heal: a stream that silently stops delivering would otherwise freeze the state."""
+        """Self-heal: a stream that silently stops delivering would otherwise freeze the state.
+
+        Also runs when a departure grace ends: a host leaves only when the router's table agrees,
+        because some routers' streams drop a host whose entry is still there (re-learned entries).
+        """
         while True:
-            await asyncio.sleep(self._timing.resync_interval)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._resync_now.wait(), self._timing.resync_interval)
+            self._resync_now.clear()
             corrected = await self._load_snapshot(connection)
             if corrected:
-                _LOGGER.info("Periodic resync found %d changed host(s)", len(corrected))
-                self._publish(Change(frozenset(corrected)))
+                _LOGGER.debug("Resync found %d changed host(s)", len(corrected))
+            self._publish(Change(frozenset(corrected)))  # also re-arms the timer of a grace still running
 
     async def _keepalive(self, connection: RouterOSConnection) -> None:
         """Detect a silently dead link, which a quiet `listen` stream would never reveal."""
@@ -193,7 +201,10 @@ class RouterWatcher:
 
     def _end_grace(self) -> None:
         self._grace_timer = None
-        self._publish(Change(frozenset(self.registry.refresh())))
+        if self.connected:
+            self._resync_now.set()  # confirm the departure with the router's table first
+        else:
+            self._publish(Change(frozenset(self.registry.refresh())))
 
     def _notify(self, change: Change) -> None:
         if not change.macs and not change.link:
