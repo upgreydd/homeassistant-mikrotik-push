@@ -17,6 +17,9 @@ LEASE = {".id": "*1", "mac-address": MAC, "address": "10.0.0.5", "status": "boun
 BRIDGE_HOST = {".id": "*B1", "mac-address": MAC, "on-interface": "ether3", "dynamic": "true",
                "local": "false"}
 BRIDGE_HOST_GONE = {".id": "*B1", ".dead": "yes"}
+WIFI_PATH = "/interface/wifi/registration-table"
+WIFI_CLIENT = {".id": "*11E", "interface": "2GHz_hAP", "mac-address": MAC, "uptime": "0s",
+               "authorized": "true"}
 
 FAST = Timing(departure_grace=0, resync_interval=60, keepalive_interval=60,
               first_retry_delay=0.02, max_retry_delay=0.1)
@@ -223,3 +226,25 @@ async def test_a_listen_stream_that_ends_quietly_leads_to_a_reconnect(router, st
     router.end_listen.add(BRIDGE_PATH)
     await start_watcher()
     await until(lambda: router.login_count >= 2)
+
+
+async def test_a_router_without_wifi_is_watched_as_before(router, start_watcher):
+    router.reject_listen.add(WIFI_PATH)  # and its print fails: the fake has no such table
+    watcher = (await start_watcher()).watcher
+    await until(lambda: watcher.connected)
+
+    await router.push(BRIDGE_PATH, BRIDGE_HOST)
+    await until(lambda: watcher.registry.hosts[MAC].connected)
+    assert router.login_count == 1  # the refused wifi table did not cost the session
+
+
+async def test_a_wifi_registration_event_connects_the_host(router, start_watcher):
+    router.tables[WIFI_PATH] = []
+    watcher = (await start_watcher()).watcher
+    await until(lambda: watcher.connected)
+    await router.wait_for_subscribers(3)
+
+    await router.push(WIFI_PATH, WIFI_CLIENT)
+
+    await until(lambda: watcher.registry.hosts[MAC].connected)
+    assert watcher.registry.hosts[MAC].port == "2GHz_hAP"

@@ -10,7 +10,13 @@ from dataclasses import dataclass
 
 from .const import IDENTITY_PATH
 from .registry import HostRegistry, Row, Table
-from .routeros import AccessRefused, RouterOSConnection, RouterOSError, forward_events
+from .routeros import (
+    AccessRefused,
+    ConnectionLost,
+    RouterOSConnection,
+    RouterOSError,
+    forward_events,
+)
 from .telemetry import RouterTelemetry
 
 _LOGGER = logging.getLogger(__name__)
@@ -18,6 +24,11 @@ _LOGGER = logging.getLogger(__name__)
 TABLE_PATHS = {
     Table.LEASE: "/ip/dhcp-server/lease",
     Table.BRIDGE_HOST: "/interface/bridge/host",
+}
+# Only a router with the wifi package (an access point or a CAPsMAN manager) has this; elsewhere it
+# is skipped, and the setup does not require it.
+OPTIONAL_TABLE_PATHS = {
+    Table.WIFI_REGISTRATION: "/interface/wifi/registration-table",
 }
 
 ConnectionFactory = Callable[[], Awaitable[RouterOSConnection]]
@@ -111,12 +122,11 @@ class RouterWatcher:
             async with asyncio.TaskGroup() as tasks:
                 # The listen commands are written to the socket before the snapshot is requested
                 # (tasks start in order), so no change can slip between snapshot and stream.
-                for table, path in TABLE_PATHS.items():
-                    tasks.create_task(
-                        forward_events(
-                            connection, path, lambda event, table=table: events.put_nowait((table, event))
-                        )
+                for table, path in (TABLE_PATHS | OPTIONAL_TABLE_PATHS).items():
+                    stream = forward_events(
+                        connection, path, lambda event, table=table: events.put_nowait((table, event))
                     )
+                    tasks.create_task(_optional(path, stream) if table in OPTIONAL_TABLE_PATHS else stream)
                 tasks.create_task(self._apply_snapshot_then_events(connection, events))
                 tasks.create_task(self._keepalive(connection))
                 if self.telemetry:
@@ -142,6 +152,8 @@ class RouterWatcher:
         changed: set[str] = set()
         for table, path in TABLE_PATHS.items():
             changed |= self.registry.replace(table, await connection.call(f"{path}/print"))
+        for table, path in OPTIONAL_TABLE_PATHS.items():
+            changed |= self.registry.replace(table, await _optional(path, connection.call(f"{path}/print")) or [])
         return changed
 
     async def _resync_periodically(self, connection: RouterOSConnection) -> None:
@@ -214,6 +226,17 @@ class RouterWatcher:
                 listener(change)
             except Exception:
                 _LOGGER.exception("A watcher listener failed")
+
+
+async def _optional[T](path: str, reading: Awaitable[T]) -> T | None:
+    """A table the router may not have: its refusal ends only this reading, a lost link ends all."""
+    try:
+        return await reading
+    except ConnectionLost:
+        raise
+    except RouterOSError as error:
+        _LOGGER.debug("%s is not followed: %s", path, error)
+        return None
 
 
 def _log_failure(message: str, error: Exception) -> None:

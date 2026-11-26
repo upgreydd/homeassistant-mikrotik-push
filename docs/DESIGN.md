@@ -15,7 +15,7 @@ features (NAT, mangle, filter, queues, captive portal, GPS, UPS).
 |---|---|
 | `wire.py` | RouterOS API word/sentence encoding (pure) |
 | `routeros.py` | one TCP/TLS connection, login, commands multiplexed by `.tag`, `listen` streams |
-| `registry.py` | merges DHCP leases and bridge hosts into hosts by MAC; departure grace (pure) |
+| `registry.py` | merges DHCP leases, bridge hosts and wifi registrations into hosts by MAC; departure grace (pure) |
 | `watcher.py` | snapshot + streams + periodic resync + keepalive + reconnect; HA-free |
 | `telemetry.py` | optional readings: port state, traffic, CPU/memory, health, RouterOS update; HA-free |
 | `router_info.py` | name, model, serial number and version, read once per connection |
@@ -43,13 +43,19 @@ features (NAT, mangle, filter, queues, captive portal, GPS, UPS).
 ## Presence definition
 - **Known host:** holds a DHCP lease on the router (enabled). Hosts only seen on the bridge are ignored.
 - **Connected:** its MAC is learned on the bridge (`/interface/bridge/host`, dynamic, not `local`, not
-  invalid/disabled) **or** it left the bridge less than 180 s ago.
+  invalid/disabled), **or** registered and authorized on a wifi interface
+  (`/interface/wifi/registration-table`: wifi package, an access point or a CAPsMAN manager), **or** it left
+  both less than 180 s ago. A router without that table is watched as before; it is optional.
+- A departure the stream reports is confirmed when the grace ends: the tables are read again first, and a
+  host the router still has stays connected.
 - Arrival is near-instant. Departure takes the bridge ageing time (default 5 min) plus the 180 s grace.
 - The grace exists because a port flap or an access-point reboot flushes every MAC learned on that port.
 - ARP is not used: it produced ~1.5 events/s (status churn), and a stale entry keeps a device that has left
   looking present, which would make people "home" after they left.
 - Idle phones that sleep their Wi-Fi may stop sending frames and age out of the bridge table; they then
-  show "not home" after the departure time above until they talk again.
+  show "not home" after the departure time above until they talk again, unless the router also holds their
+  wifi registration (they stay associated while asleep). The legacy `wireless` and old CAPsMAN
+  (`/caps-man`) registration tables are not read. Not yet verified on a real wifi router.
 
 ## Pushed readings (measured on RouterOS 7.25.1, RB5009)
 Home Assistant opens the one connection and subscribes; the router then pushes down it.
@@ -110,7 +116,8 @@ the script.
 - The 180 s grace and 5 min resync are constants, not options.
 - Not yet measured: events at AP reboot / port flap and sleeping phones over a long period.
 - Departure is slow by design (about 5-8 min): the bridge ageing time plus the grace.
-- The router user needs read access to both tables; otherwise setup reports `router_error`.
+- The router user needs read access to both tables (leases, bridge hosts); otherwise setup reports
+  `router_error`. The wifi registration table is read when the router has it.
 
 ## Roadmap
 1. Long capture on the real router (AP reboot, sleeping phones) and tune the grace.

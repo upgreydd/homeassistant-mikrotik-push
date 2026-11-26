@@ -170,3 +170,54 @@ class TestDepartureGrace:
         registry = HostRegistry(departure_grace=180, clock=clock)
         registry.replace(Table.LEASE, [lease()])
         assert not registry.hosts[MAC].connected
+
+
+def wifi_client(**fields):
+    return {".id": "*W1", "mac-address": MAC.lower(), "interface": "2GHz_hAP", "ssid": "Home",
+            "authorized": "true", **fields}
+
+
+def test_wifi_registration_connects_the_host_and_reports_the_interface(registry):
+    registry.replace(Table.LEASE, [lease()])
+    registry.replace(Table.WIFI_REGISTRATION, [wifi_client()])
+    assert (registry.hosts[MAC].connected, registry.hosts[MAC].port) == (True, "2GHz_hAP")
+
+
+def test_the_bridge_port_wins_when_a_mac_is_on_both(registry):
+    registry.replace(Table.LEASE, [lease()])
+    registry.replace(Table.WIFI_REGISTRATION, [wifi_client()])
+    registry.replace(Table.BRIDGE_HOST, [bridge_host()])
+    assert registry.hosts[MAC].port == "ether3"
+
+
+def test_a_client_still_in_its_handshake_does_not_count(registry):
+    registry.replace(Table.LEASE, [lease()])
+    registry.replace(Table.WIFI_REGISTRATION, [wifi_client(authorized="false")])
+    assert not registry.hosts[MAC].connected
+
+
+def test_a_sleeping_phone_stays_connected_while_registered_after_its_bridge_entry_aged_out():
+    clock = FakeClock()
+    registry = HostRegistry(departure_grace=180, clock=clock)
+    registry.replace(Table.LEASE, [lease()])
+    registry.replace(Table.BRIDGE_HOST, [bridge_host()])
+    registry.replace(Table.WIFI_REGISTRATION, [wifi_client()])
+
+    registry.apply(Table.BRIDGE_HOST, {".id": "*B1", ".dead": "true"})
+    clock.now += 600
+
+    assert registry.refresh() == set() and registry.hosts[MAC].connected
+    assert registry.seconds_until_grace_ends() is None
+
+
+def test_leaving_the_wifi_starts_the_grace_period_like_leaving_the_bridge():
+    clock = FakeClock()
+    registry = HostRegistry(departure_grace=180, clock=clock)
+    registry.replace(Table.LEASE, [lease()])
+    registry.replace(Table.WIFI_REGISTRATION, [wifi_client()])
+
+    registry.apply(Table.WIFI_REGISTRATION, {".id": "*W1", ".dead": "true"})
+    assert registry.hosts[MAC].connected and registry.seconds_until_grace_ends() == 180
+
+    clock.now += 180
+    assert registry.refresh() == {MAC} and not registry.hosts[MAC].connected

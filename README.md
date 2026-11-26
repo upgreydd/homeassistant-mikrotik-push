@@ -2,7 +2,8 @@
 
 Presence tracking for MikroTik RouterOS 7 that listens to the router instead of polling it: devices appear
 the moment the router learns them. One `device_tracker` per DHCP-leased host. Arrival is near-instant; departure takes about 5-8 minutes
-(bridge ageing plus a grace period). Trackers of leases without a comment that are not static start
+(bridge ageing plus a grace period). On a router with the wifi package (an access point or a CAPsMAN
+manager) a client registered on its wifi also counts as home, so a sleeping phone does not drop out. Trackers of leases without a comment that are not static start
 disabled, as Home Assistant does for unknown devices; enable the ones you want.
 
 - Router preparation (generated script, permissions): [docs/ROUTER_SETUP.md](docs/ROUTER_SETUP.md)

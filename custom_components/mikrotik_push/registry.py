@@ -1,8 +1,10 @@
-"""Merge router tables (DHCP leases, bridge hosts) into one view of the known hosts by MAC.
+"""Merge router tables (DHCP leases, bridge hosts, wifi registrations) into one view of the known hosts by MAC.
 
 A host is *known* when it holds a DHCP lease and *connected* while its MAC is learned on the
-bridge. A host that just left the bridge stays connected for a grace period, because a flapping
-port or a rebooting access point flushes the whole bridge table at once.
+bridge or registered on a wifi interface (wifi package, also as CAPsMAN manager). A host that just
+left both stays connected for a grace period, because a flapping port or a rebooting access point
+flushes the whole bridge table at once. The wifi registration keeps a sleeping phone connected after
+its bridge entry aged out.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ type Row = dict[str, str]
 class Table(StrEnum):
     LEASE = "lease"
     BRIDGE_HOST = "bridge_host"
+    WIFI_REGISTRATION = "wifi_registration"
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,13 +88,16 @@ class HostRegistry:
     def _rebuild(self) -> set[str]:
         now = self._clock()
         leases = _leases_by_mac(self._rows[Table.LEASE].values())
-        bridge_ports = _bridge_ports_by_mac(self._rows[Table.BRIDGE_HOST].values())
+        # The wired port wins when a MAC is on both: the bridge sees wifi clients on the AP's port.
+        ports = _wifi_interfaces_by_mac(self._rows[Table.WIFI_REGISTRATION].values()) | _bridge_ports_by_mac(
+            self._rows[Table.BRIDGE_HOST].values()
+        )
 
-        in_grace = self._track_departures(set(bridge_ports), now)
+        in_grace = self._track_departures(set(ports), now)
         self._grace_ends_at = min(in_grace.values(), default=None)
 
         previous, self.hosts = self.hosts, {
-            mac: _host(mac, lease, bridge_ports.get(mac), mac in bridge_ports or mac in in_grace)
+            mac: _host(mac, lease, ports.get(mac), mac in ports or mac in in_grace)
             for mac, lease in leases.items()
         }
         return {
@@ -132,6 +138,15 @@ def _bridge_ports_by_mac(rows: Iterable[Row]) -> dict[str, str]:
     return {
         row["mac-address"].upper(): row.get("on-interface", "")
         for row in sorted(learned, key=_row_number, reverse=True)
+    }
+
+
+def _wifi_interfaces_by_mac(rows: Iterable[Row]) -> dict[str, str]:
+    """Clients registered on a wifi interface; one still in its handshake (not authorized) is not in yet."""
+    return {
+        row["mac-address"].upper(): row.get("interface", "")
+        for row in rows
+        if row.get("mac-address") and row.get("authorized", "true") != "false"
     }
 
 
